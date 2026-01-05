@@ -2,6 +2,8 @@ const STATE = {
     money: 0,
     reputation: 0,
     requestsProcessed: 0,
+    lives: 3,
+    gameStartedAt: new Date().toISOString(),
 
     score: {
         total: 0,
@@ -45,9 +47,8 @@ const STATE = {
 
     sound: null,
 
-    // Sandbox mode state
+    // Game mode state
     gameMode: 'survival',
-    sandboxBudget: 2000,
     upkeepEnabled: true,
     trafficDistribution: {
         STATIC: 0.30,
@@ -57,11 +58,13 @@ const STATE = {
         SEARCH: 0.10,
         MALICIOUS: 0.20
     },
-    burstCount: 10,
 
     // Menu state
     gameStarted: false,
     previousTimeScale: 1,
+
+    // Tutorial mode flag
+    isTutorialMode: false,
 
     // Balance overhaul state
     gameStartTime: 0,
@@ -69,6 +72,7 @@ const STATE = {
     maliciousSpikeTimer: 0,
     maliciousSpikeActive: false,
     normalTrafficDist: null,
+    autoRepairEnabled: false,
 
     // Intervention mechanics state
     intervention: {
@@ -93,6 +97,58 @@ const STATE = {
         recentEvents: [],
 
         // Warning state
-        warnings: []
+        warnings: [],
+
+        // Event multipliers
+        costMultiplier: 1.0,
+        trafficBurstMultiplier: 1.0,
+    },
+
+    // Detailed finance tracking
+    finances: {
+        income: {
+            byType: {
+                STATIC: 0,
+                READ: 0,
+                WRITE: 0,
+                UPLOAD: 0,
+                SEARCH: 0,
+            },
+            countByType: {
+                STATIC: 0,
+                READ: 0,
+                WRITE: 0,
+                UPLOAD: 0,
+                SEARCH: 0,
+                blocked: 0,
+            },
+            requests: 0,
+            blocked: 0,
+            total: 0,
+        },
+        expenses: {
+            services: 0,
+            upkeep: 0,
+            repairs: 0,
+            autoRepair: 0,
+            byService: {
+                waf: 0,
+                alb: 0,
+                compute: 0,
+                db: 0,
+                s3: 0,
+                cache: 0,
+                sqs: 0,
+            },
+            countByService: {
+                waf: 0,
+                alb: 0,
+                compute: 0,
+                db: 0,
+                s3: 0,
+                cache: 0,
+                sqs: 0,
+            },
+        },
     }
 };

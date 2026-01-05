@@ -166,12 +166,13 @@ const TUTORIAL_STEPS = [
             '• <span class="text-green-400">Green</span> STATIC / <span class="text-yellow-400">Yellow</span> UPLOAD → Route to Storage<br>' +
             '• <span class="text-blue-400">Blue</span> READ / <span class="text-orange-400">Orange</span> WRITE / <span class="text-cyan-400">Cyan</span> SEARCH → Route to SQL DB<br>' +
             '• Cache helps STATIC (90%), READ (40%), SEARCH (15%)<br><br>' +
+            '<span class="text-yellow-400 font-bold">Click "Start Survival" from the main menu to begin the real challenge!</span><br><br>' +
             'Good luck, Architect!',
         icon: '🎉',
         highlight: null,
         action: 'finish',
         position: 'center',
-        hint: 'Don\'t worry if your budget goes negative at first! Just like real infrastructure - you invest upfront, then profit comes from processed traffic. Each completed request earns money!'
+        hint: 'The game will continue with full survival mechanics. Build wisely and scale as traffic increases!'
     }
 ];
 
@@ -179,7 +180,10 @@ class Tutorial {
     constructor() {
         this.currentStep = 0;
         this.isActive = false;
+        this.isCompleted = false;
         this.completedActions = new Set();
+        
+        // Map UI Elements
         this.modal = document.getElementById('tutorial-modal');
         this.popup = document.getElementById('tutorial-popup');
         this.backdrop = document.getElementById('tutorial-backdrop');
@@ -194,6 +198,7 @@ class Tutorial {
         this.nextBtn = document.getElementById('tutorial-next');
         this.skipBtn = document.getElementById('tutorial-skip');
         this.progressEl = document.getElementById('tutorial-progress');
+
         this.setupEventListeners();
     }
 
@@ -202,30 +207,27 @@ class Tutorial {
         this.skipBtn?.addEventListener('click', () => this.skip());
     }
 
-    isCompleted() {
-        return localStorage.getItem(TUTORIAL_STORAGE_KEY) === 'true';
-    }
-
     markCompleted() {
-        localStorage.setItem(TUTORIAL_STORAGE_KEY, 'true');
-    }
-
-    reset() {
-        localStorage.removeItem(TUTORIAL_STORAGE_KEY);
+        this.isCompleted = true; // Runtime only, no localStorage
     }
 
     start() {
         this.isActive = true;
         this.currentStep = 0;
+        this.isCompleted = false;
         this.completedActions.clear();
+        
+        STATE.gameMode = 'tutorial'; // Ensure lives aren't lost here
+        
         this.modal.classList.remove('hidden');
         this.totalStepsEl.textContent = TUTORIAL_STEPS.length;
         this.renderProgress();
+        
         this.popup.classList.add('tutorial-enter');
         setTimeout(() => this.popup.classList.remove('tutorial-enter'), 500);
+        
         this.showStep();
         document.getElementById('btn-play')?.classList.remove('pulse-green');
-
         return true;
     }
 
@@ -247,7 +249,7 @@ class Tutorial {
 
         if (step.action === 'next' || step.action === 'finish') {
             this.nextBtn.classList.remove('hidden');
-            this.nextBtn.textContent = step.action === 'finish' ? 'Start Playing!' : 'Next';
+            this.nextBtn.textContent = step.action === 'finish' ? 'Start Survival!' : 'Next';
         } else {
             this.nextBtn.classList.add('hidden');
         }
@@ -277,17 +279,9 @@ class Tutorial {
 
     positionPopup(step) {
         if (step.position === 'center') {
-            this.popup.style.right = 'auto';
-            this.popup.style.bottom = 'auto';
-            this.popup.style.left = '50%';
-            this.popup.style.top = '50%';
-            this.popup.style.transform = 'translate(-50%, -50%)';
+            Object.assign(this.popup.style, { right: 'auto', bottom: 'auto', left: '50%', top: '50%', transform: 'translate(-50%, -50%)' });
         } else {
-            this.popup.style.transform = '';
-            this.popup.style.left = 'auto';
-            this.popup.style.top = 'auto';
-            this.popup.style.right = '20px';
-            this.popup.style.bottom = '140px';
+            Object.assign(this.popup.style, { transform: '', left: 'auto', top: 'auto', right: '20px', bottom: '140px' });
         }
     }
 
@@ -295,50 +289,29 @@ class Tutorial {
         this.progressEl.innerHTML = '';
         TUTORIAL_STEPS.forEach((_, i) => {
             const dot = document.createElement('div');
-            dot.className = 'w-2 h-2 rounded-full transition-all duration-300';
-            if (i < this.currentStep) {
-                dot.className += ' bg-cyan-500';
-            } else if (i === this.currentStep) {
-                dot.className += ' bg-cyan-400 w-4';
-            } else {
-                dot.className += ' bg-gray-600';
-            }
+            dot.className = 'w-2 h-2 rounded-full transition-all duration-300 bg-gray-600';
             this.progressEl.appendChild(dot);
         });
+        this.updateProgress();
     }
 
     updateProgress() {
         const dots = this.progressEl.children;
         for (let i = 0; i < dots.length; i++) {
-            const dot = dots[i];
-            dot.className = 'w-2 h-2 rounded-full transition-all duration-300';
-            if (i < this.currentStep) {
-                dot.className += ' bg-cyan-500';
-            } else if (i === this.currentStep) {
-                dot.className += ' bg-cyan-400 w-4';
-            } else {
-                dot.className += ' bg-gray-600';
-            }
+            dots[i].className = `w-2 h-2 rounded-full transition-all duration-300 ${i < this.currentStep ? 'bg-cyan-500' : (i === this.currentStep ? 'bg-cyan-400 w-4' : 'bg-gray-600')}`;
         }
     }
 
     nextStep() {
         const step = TUTORIAL_STEPS[this.currentStep];
-
         if (step.action === 'finish') {
             this.complete();
             return;
         }
-
         this.currentStep++;
-        if (this.currentStep >= TUTORIAL_STEPS.length) {
-            this.complete();
-        } else {
-            this.popup.classList.add('tutorial-step-change');
-            setTimeout(() => this.popup.classList.remove('tutorial-step-change'), 300);
-            this.showStep();
-            new Audio('assets/sounds/click-5.mp3').play();
-        }
+        this.popup.classList.add('tutorial-step-change');
+        setTimeout(() => this.popup.classList.remove('tutorial-step-change'), 300);
+        this.showStep();
     }
 
     onAction(actionType, data = {}) {
@@ -402,33 +375,16 @@ class Tutorial {
         }
     }
 
-    skip() {
-        this.complete();
-    }
-
+    skip() { this.complete(); }
+    hide() { this.modal.classList.add('hidden'); this.clearHighlights(); }
+    
     complete() {
         this.isActive = false;
         this.clearHighlights();
         this.modal.classList.add('hidden');
         this.markCompleted();
-        STATE?.sound?.playSuccess();
-    }
-
-    hide() {
-        this.modal.classList.add('hidden');
-        this.clearHighlights();
-    }
-
-    show() {
-        if (this.isActive) {
-            this.modal.classList.remove('hidden');
-            this.showStep();
-        }
+        STATE.gameMode = 'survival'; // Switch back to survival
+        setTimeout(() => showMainMenu(), 500);
     }
 }
-
 window.tutorial = new Tutorial();
-window.resetTutorial = () => {
-    window.tutorial.reset();
-    console.log('Tutorial reset. Start a new Survival game to see the tutorial.');
-};

@@ -17,6 +17,97 @@ function formatTime(totalSeconds) {
     }
 }
 
+// CONFIG: Match this to admin.js
+const DB_SERVER_URL = ""; // e.g. "https://api.myserver.com"
+
+async function syncPlayerState() {
+    if (!DB_SERVER_URL) return; // Skip if no server connected
+
+    try {
+        const user = JSON.parse(sessionStorage.getItem('currentUser'));
+        if (!user) return;
+
+        // FETCH: Get latest lives from DB
+        const response = await fetch(`${DB_SERVER_URL}/players/${user.username}/state`);
+        if (response.ok) {
+            const data = await response.json();
+            
+            // UPDATE: If admin restored lives, update local state
+            if (data.lives !== undefined) {
+                STATE.lives = data.lives;
+                updateLivesUI(); // Refresh the hearts on screen
+                console.log("Synced with Server: Lives =", STATE.lives);
+            }
+        }
+    } catch (e) {
+        console.warn("Could not sync with DB server:", e);
+    }
+}
+
+// ==================== NEW SURVIVAL & EXPORT FEATURES ====================
+
+function updateLivesUI() {
+    const display = document.getElementById('livesDisplay');
+    const container = document.getElementById('livesContainer');
+    
+    // Show the container if we are in survival mode
+    if (container && STATE.gameMode === 'survival') {
+        container.classList.remove('hidden');
+    } else if (container) {
+        container.classList.add('hidden');
+    }
+    
+    // Update the heart display
+    if (display) {
+        // Default to 3 lives if undefined
+        const currentLives = typeof STATE.lives !== 'undefined' ? STATE.lives : 3;
+        display.innerText = '❤️'.repeat(Math.max(0, currentLives));
+    }
+}
+
+function exportFinalPlayerData(reason) {
+    // Get user info (fallback to Guest if not found)
+    const user = JSON.parse(sessionStorage.getItem('currentUser') || '{"username":"Guest", "role":"Player"}');
+    
+    const data = {
+        session: {
+            player: user.username,
+            role: user.role,
+            reason: reason,
+            timestamp: new Date().toISOString(),
+            duration: formatTime(STATE.elapsedGameTime || 0)
+        },
+        metrics: {
+            finalScore: STATE.score.total,
+            money: STATE.money,
+            reputation: STATE.reputation,
+            requestsProcessed: STATE.requestsProcessed,
+            failures: STATE.failures
+        },
+        infrastructure: STATE.services.map(s => ({
+            type: s.type,
+            tier: s.tier || 1,
+            health: Math.round(s.health),
+            position: { x: s.position.x, z: s.position.z }
+        })),
+        finances: STATE.finances
+    };
+
+    try {
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `survival_stats_${user.username}_${Date.now()}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        console.log("Game data exported successfully.");
+    } catch (e) {
+        console.error("Failed to export game data:", e);
+    }
+}
+
 // ==================== BALANCE OVERHAUL FUNCTIONS ====================
 
 function calculateTargetRPS(gameTimeSeconds) {
@@ -621,7 +712,7 @@ function updateFinancesDisplay() {
             color: "text-cyan-400",
             rate: CONFIG.trafficTypes.SEARCH.reward,
         },
-        { key: "blocked", label: "Blocked", color: "text-red-400", rate: 0.5 },
+        // { key: "blocked", label: "Blocked", color: "text-red-400", rate: 0.5 },
     ];
 
     // Update income details with per-request rate and count
@@ -631,8 +722,9 @@ function updateFinancesDisplay() {
             '<div class="grid grid-cols-4 gap-1 text-gray-500 mb-1 text-[10px]"><span>Type</span><span class="text-center">Count</span><span class="text-center">/req</span><span class="text-right">Total</span></div>';
         let hasIncome = false;
         incomeTypes.forEach((t) => {
-            const value =
-                t.key === "blocked" ? f.income.blocked : f.income.byType[t.key] || 0;
+            // const value =
+            //     t.key === "blocked" ? f.income.blocked : f.income.byType[t.key] || 0;
+            const value = f.income.byType[t.key] || 0;
             const count = f.income.countByType[t.key] || 0;
             if (value > 0 || count > 0) {
                 hasIncome = true;
@@ -740,6 +832,20 @@ function updateFinancesDisplay() {
             )}</span></div>`;
         }
 
+         // Mitigation costs
+        if (f.expenses.mitigation > 0) {
+            expenseHtml += `<div class="flex justify-between mt-1 border-t border-gray-800"><span class="text-blue-300">DDoS Mitigation</span><span class="text-red-300">-$${Math.floor(
+                f.expenses.mitigation
+            )}</span></div>`;
+        }
+
+        // Breach penalties
+        if (f.expenses.breach > 0) {
+            expenseHtml += `<div class="flex justify-between"><span class="text-red-500 font-bold">Security Breach</span><span class="text-red-500 font-bold">-$${Math.floor(
+                f.expenses.breach
+            )}</span></div>`;
+        }
+
         if (!expenseHtml) {
             expenseHtml = '<div class="text-gray-600 italic">No expenses yet</div>';
         }
@@ -751,12 +857,16 @@ function updateFinancesDisplay() {
         f.expenses.services +
         f.expenses.upkeep +
         f.expenses.repairs +
-        f.expenses.autoRepair;
+        // f.expenses.autoRepair;
+        f.expenses.autoRepair +
+        (f.expenses.mitigation || 0) +
+        (f.expenses.breach || 0);
     const expenseTotal = document.getElementById("expense-total");
     if (expenseTotal) expenseTotal.textContent = `$${Math.floor(totalExpenses)}`;
 
     // Update net profit
-    const totalIncome = f.income.total || f.income.requests + f.income.blocked;
+    // const totalIncome = f.income.total || f.income.requests + f.income.blocked;
+    const totalIncome = f.income.total;
     const netProfit = totalIncome - totalExpenses;
     const netProfitEl = document.getElementById("net-profit");
     if (netProfitEl) {
@@ -864,31 +974,33 @@ let lastMouseX = 0;
 let lastMouseY = 0;
 const panSpeed = 0.1;
 
-function resetGame(mode = "survival") {
+function resetGame(mode = "survival", isTutorial = false) {
     STATE.sound.init();
     STATE.sound.playGameBGM();
     STATE.gameMode = mode;
 
-    // Set budget based on mode
-    if (mode === "sandbox") {
-        STATE.sandboxBudget = CONFIG.sandbox.defaultBudget;
-        STATE.money = STATE.sandboxBudget;
-        STATE.upkeepEnabled = CONFIG.sandbox.upkeepEnabled;
-        STATE.trafficDistribution = {
-            STATIC: CONFIG.sandbox.trafficDistribution.STATIC / 100,
-            READ: CONFIG.sandbox.trafficDistribution.READ / 100,
-            WRITE: CONFIG.sandbox.trafficDistribution.WRITE / 100,
-            UPLOAD: CONFIG.sandbox.trafficDistribution.UPLOAD / 100,
-            SEARCH: CONFIG.sandbox.trafficDistribution.SEARCH / 100,
-            MALICIOUS: CONFIG.sandbox.trafficDistribution.MALICIOUS / 100,
-        };
-        STATE.burstCount = CONFIG.sandbox.defaultBurstCount;
-        STATE.currentRPS = CONFIG.sandbox.defaultRPS;
+    // Initialize lives for survival mode
+    if (typeof STATE.lives === 'undefined' || mode !== 'survival') {
+        // If we are starting tutorial (which passes 'survival' now) or other modes, 
+        // we might reset, BUT startTutorial passes 'survival', so this block is skipped for tutorial too.
+        // This is safer:
+        if (mode !== 'survival') {
+             STATE.lives = 3;
+        } else if (typeof STATE.lives === 'undefined') {
+             STATE.lives = 3;
+        }
+    }
+    updateLivesUI();
+
+    
+
+    // Tutorial uses higher budget
+    if (isTutorial) {
+        STATE.money = 2000;
+        STATE.isTutorialMode = true;
     } else {
         STATE.money = CONFIG.survival.startBudget;
-        STATE.upkeepEnabled = true;
-        STATE.trafficDistribution = { ...CONFIG.survival.trafficDistribution };
-        STATE.currentRPS = 0.5;
+        STATE.isTutorialMode = false;
     }
 
     STATE.reputation = 100;
@@ -922,6 +1034,30 @@ function resetGame(mode = "survival") {
     STATE.normalTrafficDist = null;
     STATE.autoRepairEnabled = false;
 
+    STATE.upkeepEnabled = true;
+    STATE.trafficDistribution = { ...CONFIG.survival.trafficDistribution };
+    STATE.currentRPS = 0.5;
+
+    // Initialize intervention state
+    STATE.intervention = {
+        trafficShiftTimer: 0,
+        trafficShiftActive: false,
+        currentShift: null,
+        originalTrafficDist: null,
+        randomEventTimer: 0,
+        activeEvent: null,
+        eventEndTime: 0,
+        eventDuration: 0,
+        pausedEvent: null,
+        remainingTime: 0,
+        currentMilestoneIndex: 0,
+        rpsMultiplier: 1.0,
+        recentEvents: [],
+        warnings: [],
+        costMultiplier: 1.0,
+        trafficBurstMultiplier: 1.0,
+    };
+
     // Initialize detailed finance tracking
     STATE.finances = {
         income: {
@@ -940,17 +1076,18 @@ function resetGame(mode = "survival") {
                 SEARCH: 0,
                 blocked: 0,
             },
-            requests: 0, // Total from all request types
-            blocked: 0, // From blocking attacks
-            total: 0, // Grand total income
+            requests: 0,
+            blocked: 0,
+            total: 0,
         },
         expenses: {
-            services: 0, // One-time service purchase costs
-            upkeep: 0, // Running upkeep costs
-            repairs: 0, // Manual repair costs
-            autoRepair: 0, // Auto-repair overhead costs
+            services: 0,
+            upkeep: 0,
+            repairs: 0,
+            autoRepair: 0,
+            mitigation: 0,
+            breach: 0,
             byService: {
-                // Breakdown by service type (upkeep + repairs)
                 waf: 0,
                 alb: 0,
                 compute: 0,
@@ -960,7 +1097,6 @@ function resetGame(mode = "survival") {
                 sqs: 0,
             },
             countByService: {
-                // Count of each service purchased
                 waf: 0,
                 alb: 0,
                 compute: 0,
@@ -1029,46 +1165,163 @@ function resetGame(mode = "survival") {
     // Mark game as started
     STATE.gameStarted = true;
 
-    // Show/hide sandbox panel and objectives panel based on mode
-    const sandboxPanel = document.getElementById("sandboxPanel");
+    // Always show objectives panel in survival mode
     const objectivesPanel = document.getElementById("objectivesPanel");
-
-    if (mode === "sandbox") {
-        // Show sandbox panel, hide objectives
-        if (sandboxPanel) {
-            sandboxPanel.classList.remove("hidden");
-            // Sync sandbox UI controls
-            syncInput("budget", STATE.sandboxBudget);
-            syncInput("rps", STATE.currentRPS);
-            syncInput("static", STATE.trafficDistribution.STATIC * 100);
-            syncInput("read", STATE.trafficDistribution.READ * 100);
-            syncInput("write", STATE.trafficDistribution.WRITE * 100);
-            syncInput("upload", STATE.trafficDistribution.UPLOAD * 100);
-            syncInput("search", STATE.trafficDistribution.SEARCH * 100);
-            syncInput("malicious", STATE.trafficDistribution.MALICIOUS * 100);
-            syncInput("burst", STATE.burstCount);
-            // Reset upkeep toggle button
-            const upkeepBtn = document.getElementById("upkeep-toggle");
-            if (upkeepBtn) {
-                upkeepBtn.textContent = STATE.upkeepEnabled
-                    ? "Upkeep: ON"
-                    : "Upkeep: OFF";
-                upkeepBtn.classList.toggle("bg-red-900/50", STATE.upkeepEnabled);
-                upkeepBtn.classList.toggle("bg-green-900/50", !STATE.upkeepEnabled);
-            }
-        }
-        if (objectivesPanel) objectivesPanel.classList.add("hidden");
-    } else {
-        // Show objectives, hide sandbox panel
-        if (sandboxPanel) sandboxPanel.classList.add("hidden");
-        if (objectivesPanel) objectivesPanel.classList.remove("hidden");
-    }
+    if (objectivesPanel) objectivesPanel.classList.remove("hidden");
 
     // Ensure loop is running
     if (!STATE.animationId) {
         animate(performance.now());
     }
+    syncPlayerState();
 }
+
+function clearActiveGameEvents() {
+    STATE.maliciousSpikeActive = false;
+    const indicator = document.getElementById("malicious-spike-indicator");
+    if (indicator) indicator.remove();
+    const maliciousWarning = document.getElementById("malicious-warning");
+    if (maliciousWarning) maliciousWarning.remove();
+    
+    if (STATE.intervention) {
+        STATE.intervention.activeEvent = null;
+        STATE.intervention.trafficShiftActive = false;
+        STATE.intervention.costMultiplier = 1.0;
+        STATE.intervention.trafficBurstMultiplier = 1.0;
+        STATE.services.forEach(s => {
+            s.tempCapacityReduction = 1.0;
+            s.isDisabled = false;
+            if(s.mesh) {
+                s.mesh.material.opacity = 1.0;
+                s.mesh.material.transparent = false;
+            }
+        });
+    }
+    
+    const bar = document.getElementById("active-event-bar");
+    if (bar) bar.classList.add("hidden");
+    const warnings = document.getElementById("intervention-warnings");
+    if (warnings) warnings.innerHTML = '';
+}
+
+window.showGameOver = (isFinalLoss, failureReason) => {
+    // 1. Pause everything
+    window.setTimeScale(0);
+    
+    // 2. Hide conflicting modals
+    document.querySelectorAll(".modal, #main-menu-modal, #sandboxPanel, #tutorial-modal, #game-over-modal").forEach(m => m.classList.add("hidden"));
+
+    // 3. Target the main modal
+    const modal = document.getElementById("modal");
+    if (!modal) {
+        console.error("Critical: #modal not found in DOM");
+        return;
+    }
+
+    const titleEl = document.getElementById("modal-title");
+    const descEl = document.getElementById("modal-desc");
+    const actionsEl = document.getElementById("modal-actions");
+
+    // 4. Generate Data
+    const analysis = analyzeFailure(); 
+    const finalReason = failureReason || analysis.reason || "System Instability";
+    const finalDesc = analysis.description;
+
+    // 5. Build Content UI
+    if (isFinalLoss) {
+        titleEl.textContent = "SYSTEM COLLAPSE";
+        titleEl.className = "text-4xl font-extrabold text-red-600 mb-4 tracking-widest uppercase animate-pulse";
+    } else {
+        titleEl.textContent = "SYSTEM FAILURE";
+        titleEl.className = "text-4xl font-bold text-white mb-4 tracking-tighter uppercase";
+    }
+
+    const statusHeader = !isFinalLoss 
+        ? `<div class="mb-4 text-lg font-bold text-red-400 animate-pulse">⚠️ INTEGRITY LOST (${STATE.lives} Lives Remaining)</div>` 
+        : ``;
+
+    descEl.innerHTML = `
+        ${statusHeader}
+        
+        <div class="text-center mb-6">
+            <div class="text-2xl font-bold text-yellow-400 mb-1">Final Score: ${Math.floor(STATE.score.total)}</div>
+            <div class="text-sm text-gray-400">Survived: ${formatTime(STATE.elapsedGameTime || 0)}</div>
+        </div>
+
+        <div class="space-y-3 text-left w-full">
+            <div class="bg-red-900/40 border border-red-500/50 rounded-lg p-3">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="text-red-500 text-xs">⚠️</span>
+                    <span class="text-red-400 font-bold text-xs uppercase tracking-wider">FAILURE REASON</span>
+                </div>
+                <div class="text-white text-sm font-semibold">${finalReason}</div>
+            </div>
+            
+            <div class="bg-blue-900/40 border border-blue-500/50 rounded-lg p-3">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="text-blue-400 text-xs">📊</span>
+                    <span class="text-blue-400 font-bold text-xs uppercase tracking-wider">ANALYSIS</span>
+                </div>
+                <div class="text-gray-300 text-xs leading-relaxed">${finalDesc}</div>
+            </div>
+            
+            <div class="bg-green-900/40 border border-green-500/50 rounded-lg p-3">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="text-green-400 text-xs">💡</span>
+                    <span class="text-green-400 font-bold text-xs uppercase tracking-wider">TIPS FOR NEXT TIME</span>
+                </div>
+                <ul class="text-gray-300 text-xs list-disc list-inside space-y-1">
+                    ${analysis.tips.map(tip => `<li>${tip}</li>`).join("")}
+                </ul>
+            </div>
+        </div>
+    `;
+
+    // 6. Configure Buttons
+    actionsEl.innerHTML = ''; 
+
+    if (isFinalLoss) {
+        // --- CASE: 0 LIVES LEFT ---
+        // Button: Main Menu
+        const menuBtn = document.createElement("button");
+        menuBtn.className = "bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-8 rounded-lg shadow-lg w-full font-mono uppercase text-sm transform transition hover:scale-105";
+        menuBtn.textContent = "Return to Main Menu";
+        menuBtn.onclick = () => {
+            exportFinalPlayerData(finalReason);
+            STATE.lives = 3; 
+            modal.classList.add("hidden");
+            openMainMenu();
+        };
+        actionsEl.appendChild(menuBtn);
+
+    } else {
+        // --- CASE: LIFE LOST ---
+        
+        // Button 1: Start Again (Green)
+        const retryBtn = document.createElement("button");
+        retryBtn.className = "bg-green-600 hover:bg-green-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105";
+        retryBtn.textContent = "Start Again";
+        retryBtn.onclick = () => {
+            modal.classList.add("hidden");
+            restartGame(); 
+        };
+
+        // Button 2: Tutorial (Cyan)
+        const tutorialBtn = document.createElement("button");
+        tutorialBtn.className = "bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105 border border-cyan-400/30";
+        tutorialBtn.textContent = "Tutorial";
+        tutorialBtn.onclick = () => {
+            modal.classList.add("hidden");
+            startTutorial(); // Launches the tutorial mode
+        };
+
+        actionsEl.appendChild(retryBtn);
+        actionsEl.appendChild(tutorialBtn);
+    }
+    
+    modal.classList.remove("hidden");
+    if(STATE.sound && STATE.sound.playGameOver) STATE.sound.playGameOver(isFinalLoss);
+};
 
 function restartGame() {
     document.getElementById("modal").classList.add("hidden");
@@ -1113,32 +1366,28 @@ function getAutoRepairUpkeep() {
     if (!STATE.autoRepairEnabled) return 0;
 
     const percent = CONFIG.survival.degradation?.autoRepairCostPercent || 0.1;
-    // 10% of total service cost per second
     const totalServiceCost = STATE.services.reduce(
         (sum, s) => sum + s.config.cost,
         0
     );
-    return (totalServiceCost * percent) / 60; // Per second
+    return (totalServiceCost * percent) / 60;
 }
 
 function retryWithSameArchitecture() {
     document.getElementById("modal").classList.add("hidden");
 
-    // Save current architecture with indices for connection mapping
     const savedServices = STATE.services.map((s, idx) => ({
         type: s.type,
         position: { x: s.position.x, y: s.position.y, z: s.position.z },
         index: idx,
-        cost: s.config.cost, // Save the cost for budget calculation
+        cost: s.config.cost,
     }));
 
-    // Calculate total cost of saved architecture
     const totalArchitectureCost = savedServices.reduce(
         (sum, s) => sum + s.cost,
         0
     );
 
-    // Save connections with indices instead of IDs
     const savedConnections = STATE.connections.map((c) => ({
         fromIndex:
             c.from === "internet"
@@ -1148,32 +1397,26 @@ function retryWithSameArchitecture() {
             c.to === "internet" ? -1 : STATE.services.findIndex((s) => s.id === c.to),
     }));
 
-    // Reset game state but keep mode
     resetGame(STATE.gameMode);
 
-    // Deduct the architecture cost from starting budget (simulate buying services)
     STATE.money -= totalArchitectureCost;
     if (STATE.finances) {
         STATE.finances.expenses.services = totalArchitectureCost;
     }
 
-    // Rebuild services in same order (bypass cost check since we already deducted)
     savedServices.forEach((saved) => {
         const pos = new THREE.Vector3(
             saved.position.x,
             saved.position.y,
             saved.position.z
         );
-        // Create service directly without cost check for retry
         const service = new Service(saved.type, pos);
         service.mesh.position.set(saved.position.x, 0, saved.position.z);
         STATE.services.push(service);
     });
 
-    // Update repair cost table after all services are created
     updateRepairCostTable();
 
-    // Rebuild connections using indices
     savedConnections.forEach((saved) => {
         const fromId =
             saved.fromIndex === -1 ? "internet" : STATE.services[saved.fromIndex]?.id;
@@ -1253,20 +1496,16 @@ function spawnRequest() {
             STATE.services.find((s) => s.id === id)
         );
 
-        // Traffic Routing Logic
         let target;
 
-        // 1. Prefer CDN for STATIC traffic
         if (type === "STATIC") {
             target = entryNodes.find(s => s?.type === "cdn");
         }
 
-        // 2. Fallback to WAF (Security Best Practice)
         if (!target) {
             target = entryNodes.find((s) => s?.type === "waf");
         }
 
-        // 3. Last Resort: Random entry point (Reckless)
         if (!target) {
             target = entryNodes[Math.floor(Math.random() * entryNodes.length)];
         }
@@ -1283,14 +1522,19 @@ function updateScore(req, outcome) {
     if (outcome === "MALICIOUS_BLOCKED") {
         STATE.score.maliciousBlocked += points.MALICIOUS_BLOCKED_SCORE;
         STATE.score.total += points.MALICIOUS_BLOCKED_SCORE;
-        // Add small reward for blocking attacks
-        const blockReward = 0.5;
-        STATE.money += blockReward;
+        // const blockReward = 0.5;
+        STATE.score.total += points.MALICIOUS_BLOCKED_SCORE;
+
+        // Mitigation cost for blocking attacks
+        const mitigationCost = CONFIG.survival.SCORE_POINTS.MALICIOUS_MITIGATION_COST || 1.0;
+        STATE.money -= mitigationCost;
+        // STATE.money += blockReward;
         if (STATE.finances) {
-            STATE.finances.income.blocked += blockReward;
-            STATE.finances.income.total += blockReward;
-            STATE.finances.income.countByType.blocked =
-                (STATE.finances.income.countByType.blocked || 0) + 1;
+            // STATE.finances.income.blocked += blockReward;
+            // STATE.finances.income.total += blockReward;
+            // STATE.finances.income.countByType.blocked =
+            //     (STATE.finances.income.countByType.blocked || 0) + 1;
+            STATE.finances.expenses.mitigation = (STATE.finances.expenses.mitigation || 0) + mitigationCost;
         }
         STATE.sound.playFraudBlocked();
     } else if (
@@ -1299,6 +1543,14 @@ function updateScore(req, outcome) {
     ) {
         STATE.reputation += points.MALICIOUS_PASSED_REPUTATION;
         STATE.failures.MALICIOUS++;
+
+        // Breach penalty
+        const breachPenalty = CONFIG.survival.SCORE_POINTS.MALICIOUS_BREACH_PENALTY || 50.0;
+        STATE.money -= breachPenalty;
+        if (STATE.finances) {
+            STATE.finances.expenses.breach = (STATE.finances.expenses.breach || 0) + breachPenalty;
+        }
+
         console.warn(
             `MALICIOUS PASSED: ${points.MALICIOUS_PASSED_REPUTATION} Rep. (Critical Failure)`
         );
@@ -1321,14 +1573,13 @@ function updateScore(req, outcome) {
         if (STATE.finances) {
             STATE.finances.income.requests += reward;
             STATE.finances.income.total += reward;
-            // Track by request type
             const reqType = req.type || "STATIC";
             STATE.finances.income.byType[reqType] =
                 (STATE.finances.income.byType[reqType] || 0) + reward;
             STATE.finances.income.countByType[reqType] =
                 (STATE.finances.income.countByType[reqType] || 0) + 1;
         }
-        STATE.reputation += points.SUCCESS_REPUTATION || 0.5; // Gain reputation on success
+        STATE.reputation += points.SUCCESS_REPUTATION || 0.5;
     } else if (outcome === "FAILED") {
         STATE.reputation += points.FAIL_REPUTATION;
         STATE.score.total -= (typeConfig.score || 5) / 2;
@@ -1375,7 +1626,6 @@ function flashMoney() {
 }
 
 function showMainMenu() {
-    // Ensure sound is initialized if possible (browsers might block until interaction)
     if (!STATE.sound.ctx) STATE.sound.init();
     STATE.sound.playMenuBGM();
 
@@ -1383,7 +1633,6 @@ function showMainMenu() {
     document.getElementById("faq-modal").classList.add("hidden");
     document.getElementById("modal").classList.add("hidden");
 
-    // Check for saved game and show/hide load button
     const loadBtn = document.getElementById("load-btn");
     const hasSave = localStorage.getItem("serverSurvivalSave") !== null;
     if (loadBtn) {
@@ -1391,13 +1640,10 @@ function showMainMenu() {
     }
 }
 
-let faqSource = "menu"; // 'menu' or 'game'
+let faqSource = "menu";
 
 window.showFAQ = (source = "menu") => {
     faqSource = source;
-    // If called from button (onclick="showFAQ()"), it defaults to 'menu' effectively unless we change the HTML.
-    // But wait, the button in index.html just calls showFAQ().
-    // We can check if main menu is visible.
 
     if (
         !document.getElementById("main-menu-modal").classList.contains("hidden")
@@ -1431,7 +1677,19 @@ window.togglePanel = (contentId, iconId) => {
 
 window.startGame = () => {
     document.getElementById("main-menu-modal").classList.add("hidden");
-    resetGame();
+    
+    // FIX: Only reset lives to 3 if we are dead or fresh start. 
+    // This allows preserving lives (e.g., 2/3) when returning from menu/tutorial.
+    if (typeof STATE.lives === 'undefined' || STATE.lives <= 0) {
+        STATE.lives = 3;
+    }
+    
+    resetGame("survival", false);
+};
+
+window.startTutorial = () => {
+    document.getElementById("main-menu-modal").classList.add("hidden");
+    resetGame("survival", true);
 
     if (window.tutorial) {
         setTimeout(() => {
@@ -1440,9 +1698,11 @@ window.startGame = () => {
     }
 };
 
-window.startSandbox = () => {
-    document.getElementById("main-menu-modal").classList.add("hidden");
-    resetGame("sandbox");
+window.resetToMenu = () => {
+    openMainMenu();
+    // Ensure we aren't stuck in a paused state that prevents menu interaction
+    STATE.isRunning = false; 
+    // We do NOT reset lives here, preserving the current count (e.g. 2)
 };
 
 function createService(type, pos) {
@@ -1464,7 +1724,6 @@ function createService(type, pos) {
     STATE.sound.playPlace();
     updateRepairCostTable();
 
-    // Notify tutorial
     if (window.tutorial?.isActive) {
         window.tutorial.onAction("place", { type });
     }
@@ -1523,7 +1782,6 @@ function createConnection(fromId, toId) {
     STATE.connections.push({ from: fromId, to: toId, mesh: line });
     STATE.sound.playConnect();
 
-    // Notify tutorial
     if (window.tutorial?.isActive) {
         window.tutorial.onAction("connect", {
             from: fromId,
@@ -1541,13 +1799,10 @@ function deleteConnection(fromId, toId) {
     const from = getEntity(fromId);
     if (!from) return false;
 
-    // Check if connection exists
     if (!from.connections.includes(toId)) return false;
 
-    // Remove from service connections array
     from.connections = from.connections.filter((c) => c !== toId);
 
-    // Find and remove the visual mesh
     const conn = STATE.connections.find(
         (c) => c.from === fromId && c.to === toId
     );
@@ -1567,13 +1822,11 @@ function getConnectionAtPoint(clientX, clientY) {
     mouse.y = -(clientY / window.innerHeight) * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
 
-    // Get the click point on the ground plane
     const clickPoint = new THREE.Vector3();
     raycaster.ray.intersectPlane(plane, clickPoint);
-    clickPoint.y = 1; // Lines are at y=1
+    clickPoint.y = 1;
 
-    // Check each connection for proximity to click
-    const threshold = 2; // Distance threshold for clicking on a line
+    const threshold = 2;
 
     for (const conn of STATE.connections) {
         const from =
@@ -1590,7 +1843,6 @@ function getConnectionAtPoint(clientX, clientY) {
         const p1 = new THREE.Vector3(from.position.x, 1, from.position.z);
         const p2 = new THREE.Vector3(to.position.x, 1, to.position.z);
 
-        // Calculate distance from point to line segment
         const line = new THREE.Line3(p1, p2);
         const closestPoint = new THREE.Vector3();
         line.closestPointToPoint(clickPoint, true, closestPoint);
@@ -1618,7 +1870,6 @@ function deleteObject(id) {
     const toRemove = STATE.connections.filter(
         (c) => c.from === id || c.to === id
     );
-    // Properly dispose geometry and materials to prevent memory leak
     toRemove.forEach((c) => {
         connectionGroup.remove(c.mesh);
         c.mesh.geometry.dispose();
@@ -1633,11 +1884,6 @@ function deleteObject(id) {
     updateRepairCostTable();
 }
 
-/**
- * Calculates the percentage if failure based on the load of the node.
- * @param {number} load fractions of 1 (0 to 1) of how loaded the node is
- * @returns {number} chance of failure (0 to 1)
- */
 function calculateFailChanceBasedOnLoad(load) {
     if (load <= 0.5) return 0;
     return 2 * (load - 0.5);
@@ -1661,7 +1907,6 @@ window.setTimeScale = (s) => {
 
     if (s === 0) {
         document.getElementById("btn-pause").classList.add("active");
-        // Only add pulse-green if tutorial is not active
         if (!window.tutorial?.isActive) {
             document.getElementById("btn-play").classList.add("pulse-green");
         }
@@ -1669,7 +1914,6 @@ window.setTimeScale = (s) => {
         document.getElementById("btn-play").classList.add("active");
         document.getElementById("btn-play").classList.remove("pulse-green");
 
-        // Notify tutorial when game starts
         if (window.tutorial?.isActive) {
             window.tutorial.onAction("start_game");
         }
@@ -1689,7 +1933,7 @@ window.toggleMute = () => {
     if (menuIcon) menuIcon.innerText = iconText;
 
     const muteBtn = document.getElementById("tool-mute");
-    const menuMuteBtn = document.getElementById("menu-mute-btn"); // We need to add ID to menu button
+    const menuMuteBtn = document.getElementById("menu-mute-btn");
 
     if (muted) {
         muteBtn.classList.add("bg-red-900");
@@ -1710,22 +1954,16 @@ const zoomSpeed = 0.001;
 container.addEventListener("wheel", (e) => {
     e.preventDefault();
 
-    // Zoom logic
     const zoomDelta = e.deltaY * -zoomSpeed;
     const newZoom = Math.max(minZoom, Math.min(maxZoom, currentZoom + zoomDelta));
 
     if (newZoom !== currentZoom) {
         currentZoom = newZoom;
-
-        // For OrthographicCamera, zoom is applied via dividing the frustum or using the zoom property
-        // Three.js OrthographicCamera has a .zoom property
         camera.zoom = currentZoom;
         camera.updateProjectionMatrix();
     }
 }, { passive: false });
 
-// Upgrade Indicator Logic
-// Upgrade Indicator Logic
 let hoveredUpgradeService = null;
 let hideUpgradeTimer = null;
 const upgradeIndicator = document.getElementById("upgrade-indicator");
@@ -1733,11 +1971,10 @@ const upgradeCostEl = document.getElementById("upgrade-cost");
 
 if (upgradeIndicator) {
     upgradeIndicator.addEventListener("click", (e) => {
-        e.stopPropagation(); // Prevent map click
+        e.stopPropagation();
         if (hoveredUpgradeService) {
             hoveredUpgradeService.upgrade();
 
-            // Immediate UI update
             const tiers = CONFIG.services[hoveredUpgradeService.type].tiers;
             if (hoveredUpgradeService.tier < tiers.length) {
                 const nextCost = tiers[hoveredUpgradeService.tier].cost;
@@ -1751,7 +1988,6 @@ if (upgradeIndicator) {
                     upgradeCostEl.classList.add("bg-green-600", "border-green-400");
                 }
             } else {
-                // Max tier reached - hide immediately
                 hoveredUpgradeService = null;
                 upgradeIndicator.classList.add("hidden");
                 if (hideUpgradeTimer) {
@@ -1762,7 +1998,6 @@ if (upgradeIndicator) {
         }
     });
 
-    // Prevent hiding when hovering the indicator itself
     upgradeIndicator.addEventListener("mouseenter", () => {
         if (hideUpgradeTimer) {
             clearTimeout(hideUpgradeTimer);
@@ -1770,7 +2005,6 @@ if (upgradeIndicator) {
         }
     });
 
-    // Start hide timer when leaving indicator
     upgradeIndicator.addEventListener("mouseleave", () => {
         if (hoveredUpgradeService) {
             hideUpgradeTimer = setTimeout(() => {
@@ -1782,7 +2016,6 @@ if (upgradeIndicator) {
     });
 }
 
-// Keyboard navigation
 const keysPressed = {};
 
 window.addEventListener("keydown", (e) => {
@@ -1812,10 +2045,8 @@ container.addEventListener("mousedown", (e) => {
         const i = getIntersect(e.clientX, e.clientY);
         if (i.type === "service") {
             const svc = STATE.services.find((s) => s.id === i.id);
-            // Use criticalHealth from config for consistency
             const criticalHealth = CONFIG.survival.degradation?.criticalHealth || 40;
             if (svc && svc.health < criticalHealth && CONFIG.survival.degradation?.enabled) {
-                // Repair on click when damaged below critical threshold
                 if (svc.repair()) {
                     addInterventionWarning(
                         `🔧 ${svc.type.toUpperCase()} repaired!`,
@@ -1864,7 +2095,6 @@ container.addEventListener("mousedown", (e) => {
             STATE.activeTool
         )
     ) {
-        // Handle upgrades for compute, db, and cache
         if (
             (STATE.activeTool === "lambda" && i.type === "service") ||
             (STATE.activeTool === "db" && i.type === "service") ||
@@ -1957,24 +2187,20 @@ container.addEventListener("mousemove", (e) => {
     const t = document.getElementById("tooltip");
     let cursor = "default";
 
-    // Reset all connection colors first
     STATE.connections.forEach((c) => {
         if (c.mesh && c.mesh.material) {
             c.mesh.material.color.setHex(CONFIG.colors.line);
         }
     });
 
-    // Handle unlink tool hover
     if (STATE.activeTool === "unlink") {
         const conn = getConnectionAtPoint(e.clientX, e.clientY);
         if (conn) {
             cursor = "pointer";
-            // Highlight the connection in red
             if (conn.mesh && conn.mesh.material) {
                 conn.mesh.material.color.setHex(0xff4444);
             }
 
-            // Get source and target names for tooltip
             const from =
                 conn.from === "internet"
                     ? STATE.internetNode
@@ -2013,12 +2239,10 @@ container.addEventListener("mousemove", (e) => {
                         ? "text-yellow-400"
                         : "text-green-400";
 
-            // Base tooltip content with static info
             let content = `<strong class="text-blue-300">${s.config.name}</strong>`;
             if (s.tier)
                 content += ` <span class="text-xs text-yellow-400">T${s.tier}</span>`;
 
-            // Show health percentage
             const healthColor =
                 s.health < 40
                     ? "text-red-400"
@@ -2029,7 +2253,6 @@ container.addEventListener("mousemove", (e) => {
                 s.health
             )}%</span>`;
 
-            // Add static description and upkeep if available
             if (s.config.tooltip) {
                 content += `<br><span class="text-xs text-gray-400">${s.config.tooltip.desc}</span>`;
                 content += `<br><span class="text-xs text-gray-500">Upkeep: <span class="text-gray-300">${s.config.tooltip.upkeep}</span></span>`;
@@ -2037,7 +2260,6 @@ container.addEventListener("mousemove", (e) => {
 
             content += `<div class="mt-1 border-t border-gray-700 pt-1">`;
 
-            // Service-specific dynamic stats
             if (s.type === "cache") {
                 const hitRate = Math.round((s.config.cacheHitRate || 0.35) * 100);
                 content += `Queue: <span class="${loadColor}">${s.queue.length}</span><br>
@@ -2063,7 +2285,6 @@ container.addEventListener("mousemove", (e) => {
             }
             content += `</div>`;
 
-            // Show upgrade option for upgradeable services
             if (
                 (STATE.activeTool === "lambda" && s.type === "compute") ||
                 (STATE.activeTool === "db" && s.type === "db") ||
@@ -2081,11 +2302,9 @@ container.addEventListener("mousemove", (e) => {
                 }
             }
 
-            // SHOW UPGRADE INDICATOR (Green Arrow)
             if (["compute", "db", "cache"].includes(s.type)) {
                 const tiers = CONFIG.services[s.type].tiers;
                 if (s.tier < tiers.length) {
-                    // Clear any pending hide timer since we are hovering a valid service
                     if (hideUpgradeTimer) {
                         clearTimeout(hideUpgradeTimer);
                         hideUpgradeTimer = null;
@@ -2094,9 +2313,8 @@ container.addEventListener("mousemove", (e) => {
                     hoveredUpgradeService = s;
                     const nextCost = tiers[s.tier].cost;
 
-                    // Project 3D position to 2D screen
                     const pos = s.mesh.position.clone();
-                    pos.y += 3; // Offset above service
+                    pos.y += 3;
                     pos.project(camera);
 
                     const x = (pos.x * .5 + .5) * container.clientWidth;
@@ -2108,7 +2326,6 @@ container.addEventListener("mousemove", (e) => {
                         upgradeIndicator.classList.remove("hidden");
                         upgradeCostEl.textContent = `$${nextCost}`;
 
-                        // Color code cost
                         if (STATE.money < nextCost) {
                             upgradeCostEl.classList.remove("bg-green-600", "border-green-400");
                             upgradeCostEl.classList.add("bg-red-600", "border-red-400");
@@ -2118,14 +2335,12 @@ container.addEventListener("mousemove", (e) => {
                         }
                     }
                 } else {
-                    // Max tier
                     if (hoveredUpgradeService === s) {
                         hoveredUpgradeService = null;
                         if (upgradeIndicator) upgradeIndicator.classList.add("hidden");
                     }
                 }
             } else {
-                // Not an upgradeable service or different type - trigger hide
                 if (hoveredUpgradeService && !hideUpgradeTimer) {
                     hideUpgradeTimer = setTimeout(() => {
                         hoveredUpgradeService = null;
@@ -2137,7 +2352,6 @@ container.addEventListener("mousemove", (e) => {
 
             showTooltip(e.clientX + 15, e.clientY + 15, content);
 
-            // Reset previous highlights
             STATE.services.forEach((svc) => {
                 if (svc !== s && svc.mesh.material.emissive)
                     svc.mesh.material.emissive.setHex(0x000000);
@@ -2145,13 +2359,11 @@ container.addEventListener("mousemove", (e) => {
         }
     } else {
         t.style.display = "none";
-        // Reset highlights when not hovering service
         STATE.services.forEach((svc) => {
             if (svc.mesh.material.emissive)
                 svc.mesh.material.emissive.setHex(0x000000);
         });
 
-        // Hide upgrade indicator if visible (with delay)
         if (hoveredUpgradeService && !hideUpgradeTimer) {
             hideUpgradeTimer = setTimeout(() => {
                 hoveredUpgradeService = null;
@@ -2164,7 +2376,6 @@ container.addEventListener("mousemove", (e) => {
     container.style.cursor = cursor;
 });
 
-// Helper function for showing tooltips
 function showTooltip(x, y, html) {
     const t = document.getElementById("tooltip");
     t.style.display = "block";
@@ -2173,14 +2384,12 @@ function showTooltip(x, y, html) {
     t.innerHTML = html;
 }
 
-// Setup UI tooltips
 function setupUITooltips() {
-    const tools = ["waf", "sqs", "alb", "lambda", "db", "cache", "s3"];
+    const tools = ["waf", "sqs", "alb", "lambda", "db", "cache", "s3", "cdn"];
     tools.forEach((toolId) => {
         const btn = document.getElementById(`tool-${toolId}`);
         if (!btn) return;
 
-        // Map tool ID to config service key
         const serviceKey = toolId === "lambda" ? "compute" : toolId;
         const config = CONFIG.services[serviceKey];
 
@@ -2193,7 +2402,7 @@ function setupUITooltips() {
                         <span class="text-gray-500">Upkeep: <span class="text-gray-300">${config.tooltip.upkeep}</span></span>
                     </div>
                 `;
-                showTooltip(e.clientX + 15, e.clientY - 100, content); // Show above the button
+                showTooltip(e.clientX + 15, e.clientY - 100, content);
             });
 
             btn.addEventListener("mouseleave", () => {
@@ -2203,7 +2412,6 @@ function setupUITooltips() {
     });
 }
 
-// Call setup
 setupUITooltips();
 
 container.addEventListener("mouseup", (e) => {
@@ -2265,32 +2473,16 @@ function animate(time) {
     STATE.animationId = requestAnimationFrame(animate);
     if (!STATE.isRunning) return;
 
-    // Limit dt to prevent huge jumps when tab loses focus
-    // (requestAnimationFrame pauses when tab is inactive)
     const rawDt = (time - STATE.lastTime) / 1000;
-    const clampedDt = Math.min(rawDt, 0.1); // Max 100ms per frame
+    const clampedDt = Math.min(rawDt, 0.1);
     const dt = clampedDt * STATE.timeScale;
     STATE.lastTime = time;
     STATE.elapsedGameTime += dt;
 
-    // Keyboard panning
-    const moveSpeed = 50 * clampedDt; // Use unscaled time so we can move while paused
-    // If zoomed in (zoom > 1), we might want to move slower, or just keep it constant world space
-    // Constant world space is usually better.
-    // Three.js OrthographicCamera zoom does not affect world coordinates directly, 
-    // so moving camera.position by X moves it by X world units regardless of zoom.
-
-    // Adjust speed based on zoom? Often players expect faster panning when zoomed out.
-    // Let's try constant world speed first, maybe scale by 1/zoom if needed.
+    const moveSpeed = 50 * clampedDt;
     const effectivePanSpeed = moveSpeed / camera.zoom;
 
     if (keysPressed["ArrowUp"] || keysPressed["w"] || keysPressed["W"]) {
-        // Move camera target and position "up" (-Z in isometric-ish view? No, usually up is -Z in 3D)
-        // Check pan logic: panY adds to Z. So Up should probably correspond to -Z.
-        // Let's match the mouse panning logic:
-        // dy (mouse down) -> panY (positive) -> z += panY.
-        // So moving mouse down moves camera +Z.
-        // Thus Up key should move camera -Z.
         if (isIsometric) {
             camera.position.x -= effectivePanSpeed;
             camera.position.z -= effectivePanSpeed;
@@ -2311,20 +2503,6 @@ function animate(time) {
         }
     }
     if (keysPressed["ArrowLeft"] || keysPressed["a"] || keysPressed["A"]) {
-        // Mouse: dx (right) -> panX (negative) -> x += panX.
-        // So moving mouse right moves camera -X.
-        // Thus Right key should move camera +X? No wait.
-        // If I drag mouse right, I expect world to move right? Or camera to move left?
-        // Standard RTS: Mouse right -> Camera moves right -> World moves left.
-        // Wait, the pan logic: dx = e.clientX - lastMouseX. If I move mouse right, dx > 0.
-        // panX = (-dx...) -> panX < 0.
-        // camera.x += panX (so camera decreases X).
-        // So dragging mouse right moves camera LEFT. This is "drag the world" style.
-        // For KEYS, pressing Right should move camera RIGHT.
-        // So Right key should contain the OPPOSITE sign of panX for right-drag.
-        // mouse right -> camera left.
-        // key right -> camera right (x increasing).
-
         if (isIsometric) {
             camera.position.x -= effectivePanSpeed;
             camera.position.z += effectivePanSpeed;
@@ -2350,47 +2528,37 @@ function animate(time) {
         keysPressed["ArrowLeft"] || keysPressed["a"] || keysPressed["A"] ||
         keysPressed["ArrowRight"] || keysPressed["d"] || keysPressed["D"])) {
         camera.lookAt(cameraTarget);
-    } else if (!isIsometric) {
-        // Simple top down
-        // already handled by pos update
     }
 
     STATE.services.forEach((s) => s.update(dt));
     STATE.requests.forEach((r) => r.update(dt));
 
     STATE.spawnTimer += dt;
-    // Apply traffic burst multiplier from random events
     const effectiveRPS =
         STATE.currentRPS * (STATE.intervention?.trafficBurstMultiplier || 1.0);
     if (effectiveRPS > 0) {
         const spawnInterval = 1 / effectiveRPS;
-        // Spawn multiple requests if timeScale causes large dt jumps
-        // This ensures correct spawn rate even when fast forwarding
         while (STATE.spawnTimer >= spawnInterval) {
             STATE.spawnTimer -= spawnInterval;
             spawnRequest();
         }
-        // Only ramp up in survival mode - use logarithmic growth
-        if (STATE.gameMode === "survival") {
+        if (STATE.gameMode === "survival" && !STATE.isTutorialMode) {
             const gameTime = STATE.elapsedGameTime;
             const targetRPS = calculateTargetRPS(gameTime);
-
-            // Smooth transition to target
             STATE.currentRPS += (targetRPS - STATE.currentRPS) * 0.01;
             STATE.currentRPS = Math.min(STATE.currentRPS, CONFIG.survival.maxRPS);
         }
     }
 
     updateMaliciousSpike(dt);
-
-    // Intervention mechanics updates
     updateTrafficShift(dt);
     updateRandomEvents(dt);
     updateServiceHealthIndicators();
     updateActiveEventTimer();
     processAutoRepair(dt);
     updateFinancesDisplay();
-
+    // checkFailureConditions is integrated below
+    
     document.getElementById("money-display").innerText = `$${Math.floor(
         STATE.money
     )}`;
@@ -2405,7 +2573,6 @@ function animate(time) {
         typeof getAutoRepairUpkeep === "function" ? getAutoRepairUpkeep() : 0;
     const totalUpkeep = baseUpkeep * multiplier + autoRepairCost;
 
-    // Deduct auto-repair cost and track it
     if (autoRepairCost > 0 && STATE.upkeepEnabled) {
         const cost = autoRepairCost * dt;
         STATE.money -= cost;
@@ -2468,25 +2635,21 @@ function animate(time) {
         "rps-display"
     ).innerText = `${STATE.currentRPS.toFixed(1)} req/s`;
 
-    // Update elapsed time
     const elapsedEl = document.getElementById("elapsed-time");
     if (elapsedEl) {
         elapsedEl.textContent = formatTime(STATE.elapsedGameTime);
     }
 
-    // Update next RPS milestone (survival mode only)
     const rpsNextEl = document.getElementById("rps-next");
     const rpsCountdownEl = document.getElementById("rps-countdown");
     const rpsMilestoneRow = document.getElementById("rps-milestone-row");
 
-    if (STATE.gameMode === "survival" && rpsMilestoneRow) {
+    if (STATE.gameMode === "survival" && rpsMilestoneRow && !STATE.isTutorialMode) {
         rpsMilestoneRow.style.display = "flex";
 
-        // Show next RPS acceleration milestone instead of arbitrary integer
         const milestones = CONFIG.survival.rpsAcceleration?.milestones || [];
         const currentTime = STATE.elapsedGameTime;
 
-        // Find next upcoming milestone
         let nextMilestone = null;
         for (const m of milestones) {
             if (m.time > currentTime) {
@@ -2502,7 +2665,6 @@ function animate(time) {
                 rpsNextEl.textContent = `×${nextMilestone.multiplier.toFixed(1)}`;
                 rpsCountdownEl.textContent = formatTime(timeRemaining);
             } else {
-                // All milestones reached
                 rpsNextEl.textContent = "MAX";
                 rpsCountdownEl.textContent = "--";
             }
@@ -2511,7 +2673,6 @@ function animate(time) {
         rpsMilestoneRow.style.display = "none";
     }
 
-    // Update failures panel with table format
     const totalFailures = Object.values(STATE.failures).reduce(
         (a, b) => a + b,
         0
@@ -2524,7 +2685,6 @@ function animate(time) {
             "failures-total"
         ).textContent = `${totalFailures} total`;
 
-        // Update counts
         document.getElementById("fail-malicious").textContent =
             STATE.failures.MALICIOUS;
         document.getElementById("fail-static").textContent = STATE.failures.STATIC;
@@ -2533,7 +2693,6 @@ function animate(time) {
         document.getElementById("fail-upload").textContent = STATE.failures.UPLOAD;
         document.getElementById("fail-search").textContent = STATE.failures.SEARCH;
 
-        // Update reputation loss (malicious = -8, others = -2)
         document.getElementById("fail-malicious-rep").textContent =
             STATE.failures.MALICIOUS * Math.abs(points.MALICIOUS_PASSED_REPUTATION);
         document.getElementById("fail-static-rep").textContent =
@@ -2547,7 +2706,6 @@ function animate(time) {
         document.getElementById("fail-search-rep").textContent =
             STATE.failures.SEARCH * Math.abs(points.FAIL_REPUTATION);
 
-        // Hide rows with 0 failures
         document.getElementById("fail-row-malicious").style.display =
             STATE.failures.MALICIOUS > 0 ? "" : "none";
         document.getElementById("fail-row-static").style.display =
@@ -2570,55 +2728,37 @@ function animate(time) {
         }
     }
 
-    // Game over only in survival mode
-    if (
+   if (
         STATE.gameMode === "survival" &&
+        !STATE.isTutorialMode &&
         (STATE.reputation <= 0 || STATE.money <= -1000)
     ) {
         STATE.isRunning = false;
 
-        // Determine failure reason and generate tips
-        const failureAnalysis = analyzeFailure();
+        // 1. Determine Reason
+        const reason = STATE.reputation <= 0 ? "Reputation Collapsed" : "Bankruptcy";
 
-        document.getElementById("modal-title").innerText = "SYSTEM FAILURE";
-        document.getElementById("modal-title").classList.add("text-red-500");
-        document.getElementById("modal-desc").innerHTML = `
-            <div class="text-left space-y-3">
-                <div class="text-center text-2xl font-bold text-yellow-400 mb-2">Final Score: ${STATE.score.total
-            }</div>
-                <div class="text-center text-sm text-gray-400 mb-4">Survived: ${formatTime(
-                STATE.elapsedGameTime || 0
-            )}</div>
-                
-                <div class="bg-red-900/30 border border-red-500/50 rounded-lg p-3">
-                    <div class="text-red-400 font-bold text-sm uppercase mb-1">⚠️ Failure Reason</div>
-                    <div class="text-white">${failureAnalysis.reason}</div>
-                </div>
-                
-                <div class="bg-blue-900/30 border border-blue-500/50 rounded-lg p-3">
-                    <div class="text-blue-400 font-bold text-sm uppercase mb-1">📊 Analysis</div>
-                    <div class="text-gray-300 text-sm">${failureAnalysis.description
-            }</div>
-                </div>
-                
-                <div class="bg-green-900/30 border border-green-500/50 rounded-lg p-3">
-                    <div class="text-green-400 font-bold text-sm uppercase mb-1">💡 Tips for Next Time</div>
-                    <ul class="text-gray-300 text-sm list-disc list-inside space-y-1">
-                        ${failureAnalysis.tips
-                .map((tip) => `<li>${tip}</li>`)
-                .join("")}
-                    </ul>
-                </div>
-            </div>
-        `;
-        document.getElementById("modal").classList.remove("hidden");
-        STATE.sound.playGameOver();
+        // 2. Clear visual events
+        clearActiveGameEvents();
+
+        // 3. Handle Lives
+        if (typeof STATE.lives === 'undefined') STATE.lives = 3;
+        STATE.lives--;
+        
+        // Update Stats UI if available
+        if(typeof updateLivesUI === 'function') updateLivesUI();
+
+        if (STATE.lives > 0) {
+            // Life Lost: Show UI with "Start Again"
+            window.showGameOver(false, reason); 
+        } else {
+            // Final Game Over: Show UI with "Return to Menu"
+            window.showGameOver(true, reason);
+        }
     }
-
     renderer.render(scene, camera);
 }
 
-// Analyze why the player failed and generate helpful tips
 function analyzeFailure() {
     const result = {
         reason: "",
@@ -2626,11 +2766,9 @@ function analyzeFailure() {
         tips: [],
     };
 
-    // Determine primary failure reason
     if (STATE.reputation <= 0) {
         result.reason = "Reputation Collapsed";
 
-        // Check what caused reputation loss
         const totalFailures = Object.values(STATE.failures).reduce(
             (a, b) => a + b,
             0
@@ -2671,7 +2809,6 @@ function analyzeFailure() {
             STATE.money
         )}). Upkeep costs exceeded your income from processed requests.`;
 
-        // Analyze spending
         if (STATE.finances) {
             const upkeepRatio =
                 STATE.finances.expenses.upkeep / (STATE.finances.income.total || 1);
@@ -2694,7 +2831,6 @@ function analyzeFailure() {
         result.tips.push("Cheaper services (WAF, S3) have lower upkeep");
     }
 
-    // Add general tips based on game state
     if (STATE.services.length < 3) {
         result.tips.push("Build a complete pipeline: WAF → ALB → Compute → DB/S3");
     }
@@ -2703,7 +2839,6 @@ function analyzeFailure() {
         result.tips.push("Add Cache to improve hit rates and reduce DB load");
     }
 
-    // Limit tips to 4
     result.tips = result.tips.slice(0, 4);
 
     return result;
@@ -2721,7 +2856,6 @@ window.addEventListener("resize", () => {
 
 document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
-        // Toggle main menu
         const menu = document.getElementById("main-menu-modal");
         if (menu.classList.contains("hidden")) {
             openMainMenu();
@@ -2759,100 +2893,14 @@ function resetCamera() {
     }
 }
 
-// ==================== SANDBOX MODE FUNCTIONS ====================
-
-function syncInput(name, value) {
-    const slider = document.getElementById(`${name}-slider`);
-    const input = document.getElementById(`${name}-input`);
-    if (slider) slider.value = value;
-    if (input) input.value = value;
-}
-
-window.setSandboxBudget = (value) => {
-    const v = Math.max(0, parseInt(value) || 0);
-    STATE.sandboxBudget = v;
-    STATE.money = v;
-    syncInput("budget", v);
-};
-
-window.resetBudget = () => {
-    STATE.money = STATE.sandboxBudget;
-};
-
-window.setSandboxRPS = (value) => {
-    const v = Math.max(0, parseFloat(value) || 0);
-    STATE.currentRPS = v;
-    syncInput("rps", v);
-};
-
-window.setTrafficMix = (type, value) => {
-    const v = Math.max(0, Math.min(100, parseFloat(value) || 0));
-    STATE.trafficDistribution[type] = v / 100;
-    syncInput(type.toLowerCase(), v);
-};
-
-window.setBurstCount = (value) => {
-    const v = Math.max(1, parseInt(value) || 10);
-    STATE.burstCount = v;
-    syncInput("burst", v);
-};
-
-window.spawnBurst = (type) => {
-    for (let i = 0; i < STATE.burstCount; i++) {
-        setTimeout(() => {
-            const req = new Request(type);
-            STATE.requests.push(req);
-            const conns = STATE.internetNode.connections;
-            if (conns.length > 0) {
-                const entryNodes = conns.map((id) =>
-                    STATE.services.find((s) => s.id === id)
-                );
-                const wafEntry = entryNodes.find((s) => s?.type === "waf");
-                const target =
-                    wafEntry || entryNodes[Math.floor(Math.random() * entryNodes.length)];
-                if (target) req.flyTo(target);
-                else failRequest(req);
-            } else {
-                failRequest(req);
-            }
-        }, i * 30);
-    }
-};
-
-window.toggleUpkeep = () => {
-    STATE.upkeepEnabled = !STATE.upkeepEnabled;
-    const btn = document.getElementById("upkeep-toggle");
-    if (btn) {
-        btn.textContent = STATE.upkeepEnabled ? "Upkeep: ON" : "Upkeep: OFF";
-        btn.classList.toggle("bg-red-900/50", STATE.upkeepEnabled);
-        btn.classList.toggle("bg-green-900/50", !STATE.upkeepEnabled);
-    }
-};
-
-window.clearAllServices = () => {
-    STATE.services.forEach((s) => s.destroy());
-    STATE.services = [];
-    STATE.connections.forEach((c) => connectionGroup.remove(c.mesh));
-    STATE.connections = [];
-    STATE.internetNode.connections = [];
-    STATE.requests.forEach((r) => r.destroy());
-    STATE.requests = [];
-    STATE.money = STATE.sandboxBudget;
-};
-
-// ==================== MENU FUNCTIONS ====================
-
 function openMainMenu() {
-    // Store current time scale and pause
     STATE.previousTimeScale = STATE.timeScale;
     setTimeScale(0);
 
-    // Hide tutorial while menu is open
     if (window.tutorial?.isActive) {
         window.tutorial.hide();
     }
 
-    // Show resume button if game is active
     const resumeBtn = document.getElementById("resume-btn");
     if (resumeBtn) {
         if (STATE.gameStarted && STATE.isRunning) {
@@ -2862,74 +2910,69 @@ function openMainMenu() {
         }
     }
 
-    // Check for saved game and show/hide load button
     const loadBtn = document.getElementById("load-btn");
     const hasSave = localStorage.getItem("serverSurvivalSave") !== null;
     if (loadBtn) {
         loadBtn.style.display = hasSave ? "block" : "none";
     }
 
-    // Show main menu
     document.getElementById("main-menu-modal").classList.remove("hidden");
     STATE.sound.playMenuBGM();
 }
 
 window.resumeGame = () => {
-    // Hide main menu, keep game paused
     document.getElementById("main-menu-modal").classList.add("hidden");
     STATE.sound.playGameBGM();
 
-    // Restore tutorial if active
     if (window.tutorial?.isActive) {
         window.tutorial.show();
     }
 };
 
-// ==================== SAVE/LOAD FUNCTIONS ====================
+// window.saveGameState = () => {
+//     try {
+//         const saveData = {
+//             timestamp: Date.now(),
+//             version: "2.0",
+//             ...STATE,
+//             score: { ...STATE.score },
+//             trafficDistribution: { ...STATE.trafficDistribution },
+//             services: STATE.services.map((service) => ({
+//                 id: service.id,
+//                 type: service.type,
+//                 position: [service.position.x, service.position.y, service.position.z],
+//                 connections: [...service.connections],
+//                 tier: service.tier,
+//                 cacheHitRate: service.config.cacheHitRate || null,
+//             })),
+//             connections: STATE.connections.map((conn) => ({
+//                 from: conn.from,
+//                 to: conn.to,
+//             })),
+//             requests: [],
+//             internetConnections: [...STATE.internetNode.connections],
+//             lives: STATE.lives
+//         };
 
-window.saveGameState = () => {
-    try {
-        const saveData = {
-            timestamp: Date.now(),
-            version: "2.0",
-            ...STATE,
-            score: { ...STATE.score },
-            trafficDistribution: { ...STATE.trafficDistribution },
-            services: STATE.services.map((service) => ({
-                id: service.id,
-                type: service.type,
-                position: [service.position.x, service.position.y, service.position.z],
-                connections: [...service.connections],
-                tier: service.tier,
-                cacheHitRate: service.config.cacheHitRate || null,
-            })),
-            connections: STATE.connections.map((conn) => ({
-                from: conn.from,
-                to: conn.to,
-            })),
-            requests: [],
-            internetConnections: [...STATE.internetNode.connections],
-        };
+//         localStorage.setItem("serverSurvivalSave", JSON.stringify(saveData));
 
-        localStorage.setItem("serverSurvivalSave", JSON.stringify(saveData));
+//         const saveBtn = document.getElementById("btn-save");
+//         const originalColor = saveBtn.classList.contains("hover:border-green-500")
+//             ? ""
+//             : saveBtn.style.borderColor;
+//         saveBtn.style.borderColor = "#10b981";
+//         saveBtn.style.color = "#10b981";
+//         setTimeout(() => {
+//             saveBtn.style.borderColor = originalColor;
+//             saveBtn.style.color = "";
+//         }, 1000);
 
-        const saveBtn = document.getElementById("btn-save");
-        const originalColor = saveBtn.classList.contains("hover:border-green-500")
-            ? ""
-            : saveBtn.style.borderColor;
-        saveBtn.style.borderColor = "#10b981"; // green-500
-        saveBtn.style.color = "#10b981";
-        setTimeout(() => {
-            saveBtn.style.borderColor = originalColor;
-            saveBtn.style.color = "";
-        }, 1000);
-
-        STATE.sound.playPlace(); // Use place sound as feedback
-    } catch (error) {
-        console.error("Failed to save game:", error);
-        alert("Failed to save game. Please try again.");
-    }
-};
+//         STATE.sound.playPlace();
+//     } catch (error) {
+//         console.error("Failed to save game:", error);
+//         alert("Failed to save game. Please try again.");
+//     }
+// };
 
 function migrateOldSave(saveData) {
     if (saveData.trafficDistribution) {
@@ -2970,157 +3013,130 @@ function migrateOldSave(saveData) {
     return saveData;
 }
 
-window.loadGameState = () => {
-    try {
-        const saveDataStr = localStorage.getItem("serverSurvivalSave");
-        if (!saveDataStr) {
-            alert("No saved game found.");
-            return;
-        }
+// window.loadGameState = () => {
+//     try {
+//         const saveDataStr = localStorage.getItem("serverSurvivalSave");
+//         if (!saveDataStr) {
+//             alert("No saved game found.");
+//             return;
+//         }
 
-        let saveData = JSON.parse(saveDataStr);
+//         let saveData = JSON.parse(saveDataStr);
 
-        if (!saveData.version || saveData.version === "1.0") {
-            saveData = migrateOldSave(saveData);
-        }
+//         if (!saveData.version || saveData.version === "1.0") {
+//             saveData = migrateOldSave(saveData);
+//         }
 
-        clearCurrentGame();
+//         clearCurrentGame();
 
-        STATE.money = saveData.money || 0;
-        STATE.reputation = saveData.reputation || 100;
-        STATE.requestsProcessed = saveData.requestsProcessed || 0;
-        STATE.score = { ...saveData.score } || {
-            total: 0,
-            storage: 0,
-            database: 0,
-            maliciousBlocked: 0,
-        };
-        STATE.activeTool = saveData.activeTool || "select";
-        STATE.selectedNodeId = saveData.selectedNodeId || null;
-        STATE.lastTime = performance.now(); // Reset timing
-        STATE.spawnTimer = saveData.spawnTimer || 0;
-        STATE.currentRPS = saveData.currentRPS || 0.5;
-        STATE.timeScale = saveData.timeScale || 0; // Start paused
-        STATE.elapsedGameTime = saveData.elapsedGameTime ?? 0;
-        STATE.isRunning = saveData.isRunning || false;
-        STATE.gameStartTime = performance.now();
+//         STATE.money = saveData.money || 0;
+//         STATE.reputation = saveData.reputation || 100;
+//         STATE.requestsProcessed = saveData.requestsProcessed || 0;
+//         STATE.score = { ...saveData.score } || {
+//             total: 0,
+//             storage: 0,
+//             database: 0,
+//             maliciousBlocked: 0,
+//         };
+//         STATE.activeTool = saveData.activeTool || "select";
+//         STATE.selectedNodeId = saveData.selectedNodeId || null;
+//         STATE.lastTime = performance.now();
+//         STATE.spawnTimer = saveData.spawnTimer || 0;
+//         STATE.currentRPS = saveData.currentRPS || 0.5;
+//         STATE.timeScale = saveData.timeScale || 0;
+//         STATE.elapsedGameTime = saveData.elapsedGameTime ?? 0;
+//         STATE.isRunning = saveData.isRunning || false;
+//         STATE.gameStartTime = performance.now();
+//         STATE.lives = saveData.lives ?? 3;
 
-        STATE.gameMode = saveData.gameMode || "survival";
-        STATE.sandboxBudget = saveData.sandboxBudget || 2000;
-        STATE.upkeepEnabled = saveData.upkeepEnabled !== false;
-        STATE.trafficDistribution = { ...saveData.trafficDistribution } || {
-            STATIC: 0.3,
-            READ: 0.2,
-            WRITE: 0.15,
-            UPLOAD: 0.05,
-            SEARCH: 0.1,
-            MALICIOUS: 0.2,
-        };
-        STATE.burstCount = saveData.burstCount || 10;
-        STATE.gameStarted = saveData.gameStarted || true;
-        STATE.previousTimeScale = saveData.previousTimeScale || 1;
+//         STATE.gameMode = saveData.gameMode || "survival";
+//         STATE.upkeepEnabled = saveData.upkeepEnabled !== false;
+//         STATE.trafficDistribution = { ...saveData.trafficDistribution } || {
+//             STATIC: 0.3,
+//             READ: 0.2,
+//             WRITE: 0.15,
+//             UPLOAD: 0.05,
+//             SEARCH: 0.1,
+//             MALICIOUS: 0.2,
+//         };
+//         STATE.gameStarted = saveData.gameStarted || true;
+//         STATE.previousTimeScale = saveData.previousTimeScale || 1;
 
-        // Initialize intervention state for survival mode mechanics
-        if (STATE.gameMode === "survival") {
-            STATE.intervention = {
-                trafficShiftTimer: 0,
-                trafficShiftActive: false,
-                currentShift: null,
-                originalTrafficDist: null,
-                randomEventTimer: 0,
-                activeEvent: null,
-                eventEndTime: 0,
-                currentMilestoneIndex: 0,
-                rpsMultiplier: 1.0,
-                recentEvents: [],
-                warnings: [],
-                costMultiplier: 1.0,
-                trafficBurstMultiplier: 1.0,
-            };
-            STATE.maliciousSpikeTimer = 0;
-            STATE.maliciousSpikeActive = false;
-            STATE.normalTrafficDist = null;
-            STATE.autoRepairEnabled = false;
-        }
+//         if (STATE.gameMode === "survival") {
+//             STATE.intervention = {
+//                 trafficShiftTimer: 0,
+//                 trafficShiftActive: false,
+//                 currentShift: null,
+//                 originalTrafficDist: null,
+//                 randomEventTimer: 0,
+//                 activeEvent: null,
+//                 eventEndTime: 0,
+//                 currentMilestoneIndex: 0,
+//                 rpsMultiplier: 1.0,
+//                 recentEvents: [],
+//                 warnings: [],
+//                 costMultiplier: 1.0,
+//                 trafficBurstMultiplier: 1.0,
+//             };
+//             STATE.maliciousSpikeTimer = 0;
+//             STATE.maliciousSpikeActive = false;
+//             STATE.normalTrafficDist = null;
+//             STATE.autoRepairEnabled = false;
+//         }
 
-        // Initialize finances tracking
-        STATE.finances = {
-            income: {
-                byType: { STATIC: 0, READ: 0, WRITE: 0, UPLOAD: 0, SEARCH: 0 },
-                countByType: { STATIC: 0, READ: 0, WRITE: 0, UPLOAD: 0, SEARCH: 0, blocked: 0 },
-                requests: 0,
-                blocked: 0,
-                total: 0,
-            },
-            expenses: {
-                services: 0,
-                upkeep: 0,
-                repairs: 0,
-                autoRepair: 0,
-                byService: { waf: 0, alb: 0, compute: 0, db: 0, s3: 0, cache: 0, sqs: 0 },
-                countByService: { waf: 0, alb: 0, compute: 0, db: 0, s3: 0, cache: 0, sqs: 0 },
-            },
-        };
+//         STATE.finances = {
+//             income: {
+//                 byType: { STATIC: 0, READ: 0, WRITE: 0, UPLOAD: 0, SEARCH: 0 },
+//                 countByType: { STATIC: 0, READ: 0, WRITE: 0, UPLOAD: 0, SEARCH: 0, blocked: 0 },
+//                 requests: 0,
+//                 blocked: 0,
+//                 total: 0,
+//             },
+//             expenses: {
+//                 services: 0,
+//                 upkeep: 0,
+//                 repairs: 0,
+//                 autoRepair: 0,
+//                 byService: { waf: 0, alb: 0, compute: 0, db: 0, s3: 0, cache: 0, sqs: 0 },
+//                 countByService: { waf: 0, alb: 0, compute: 0, db: 0, s3: 0, cache: 0, sqs: 0 },
+//             },
+//         };
 
-        restoreServices(saveData.services);
+//         restoreServices(saveData.services);
 
-        restoreConnections(
-            saveData.connections,
-            saveData.internetConnections || []
-        );
+//         restoreConnections(
+//             saveData.connections,
+//             saveData.internetConnections || []
+//         );
 
-        updateScoreUI();
-        document.getElementById("money-display").innerText = `$${Math.floor(
-            STATE.money
-        )}`;
-        document.getElementById("rep-bar").style.width = `${Math.max(
-            0,
-            STATE.reputation
-        )}%`;
-        document.getElementById(
-            "rps-display"
-        ).innerText = `${STATE.currentRPS.toFixed(1)} req/s`;
+//         updateScoreUI();
+//         updateLivesUI();
+//         document.getElementById("money-display").innerText = `$${Math.floor(
+//             STATE.money
+//         )}`;
+//         document.getElementById("rep-bar").style.width = `${Math.max(
+//             0,
+//             STATE.reputation
+//         )}%`;
+//         document.getElementById(
+//             "rps-display"
+//         ).innerText = `${STATE.currentRPS.toFixed(1)} req/s`;
 
-        const sandboxPanel = document.getElementById("sandboxPanel");
-        const objectivesPanel = document.getElementById("objectivesPanel");
+//         const objectivesPanel = document.getElementById("objectivesPanel");
+//         if (objectivesPanel) objectivesPanel.classList.remove("hidden");
 
-        if (STATE.gameMode === "sandbox") {
-            if (sandboxPanel) sandboxPanel.classList.remove("hidden");
-            if (objectivesPanel) objectivesPanel.classList.add("hidden");
-            syncInput("budget", STATE.sandboxBudget);
-            syncInput("rps", STATE.currentRPS);
-            syncInput("static", (STATE.trafficDistribution.STATIC || 0) * 100);
-            syncInput("read", (STATE.trafficDistribution.READ || 0) * 100);
-            syncInput("write", (STATE.trafficDistribution.WRITE || 0) * 100);
-            syncInput("upload", (STATE.trafficDistribution.UPLOAD || 0) * 100);
-            syncInput("search", (STATE.trafficDistribution.SEARCH || 0) * 100);
-            syncInput("malicious", (STATE.trafficDistribution.MALICIOUS || 0) * 100);
-            syncInput("burst", STATE.burstCount);
-            const upkeepBtn = document.getElementById("upkeep-toggle");
-            if (upkeepBtn) {
-                upkeepBtn.textContent = STATE.upkeepEnabled
-                    ? "Upkeep: ON"
-                    : "Upkeep: OFF";
-                upkeepBtn.classList.toggle("bg-red-900/50", STATE.upkeepEnabled);
-                upkeepBtn.classList.toggle("bg-green-900/50", !STATE.upkeepEnabled);
-            }
-        } else {
-            if (sandboxPanel) sandboxPanel.classList.add("hidden");
-            if (objectivesPanel) objectivesPanel.classList.remove("hidden");
-        }
+//         document.getElementById("main-menu-modal").classList.add("hidden");
 
-        document.getElementById("main-menu-modal").classList.add("hidden");
+//         if (!STATE.animationId) {
+//             animate(performance.now());
+//         }
 
-        if (!STATE.animationId) {
-            animate(performance.now());
-        }
-
-        STATE.sound.playPlace();
-    } catch (error) {
-        console.error("Failed to load game:", error);
-        alert("Failed to load game. The save file may be corrupted.");
-    }
-};
+//         STATE.sound.playPlace();
+//     } catch (error) {
+//         console.error("Failed to load game:", error);
+//         alert("Failed to load game. The save file may be corrupted.");
+//     }
+// };
 
 function clearCurrentGame() {
     while (serviceGroup.children.length > 0) {
@@ -3153,7 +3169,6 @@ function restoreServices(savedServices) {
 }
 
 function restoreConnections(savedConnections, internetConnections) {
-    // internetConnections is an array of service IDs (strings), not objects
     internetConnections.forEach((serviceId) => {
         createConnection("internet", serviceId);
     });

@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SERVER: Admin Command</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="style.css" />
+    <script>
+        // Security Check: Kick out non-admins
+        const user = JSON.parse(sessionStorage.getItem('currentUser') || '{}');
+        if (user.username !== 'admin') {
+            window.location.href = 'index.html';
+        }
+    </script>
+</head>
+<body class="bg-gray-900 text-white font-sans overflow-y-auto">
+
+    <div class="min-h-screen p-8">
+        <div class="max-w-6xl mx-auto mb-8 flex justify-between items-end">
+            <div>
+                <h1 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-red-500 to-orange-400 tracking-tighter">
+                    ADMIN COMMAND
+                </h1>
+                <p class="text-gray-400 font-mono text-sm">INSTRUCTOR OVERRIDE CONSOLE</p>
+            </div>
+            <a href="index.html" class="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded border border-gray-600 font-mono text-sm transition">
+                Return to Game
+            </a>
+        </div>
+
+        <div class="max-w-6xl mx-auto grid grid-cols-1 gap-6">
+            
+            <div class="glass-panel p-6 rounded-2xl border border-gray-700">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold text-blue-400 flex items-center gap-2">
+                        <span>👥</span> Active Operators
+                    </h2>
+                    <button onclick="adminDashboard.refreshData()" class="text-xs bg-blue-900/50 hover:bg-blue-800 text-blue-200 px-3 py-1 rounded border border-blue-500/30 transition">
+                        ↻ Refresh Data
+                    </button>
+                </div>
+                <thead class="bg-gray-800/50 text-xs uppercase font-medium text-gray-400">
+                    <tr>
+                        <th class="px-6 py-3 text-left tracking-wider">ID</th>
+                        <th class="px-6 py-3 text-left tracking-wider">Operator Name</th>
+                        <th class="px-6 py-3 text-left tracking-wider">Status</th>
+                        <th class="px-6 py-3 text-left tracking-wider">Lives</th>
+                        <th class="px-6 py-3 text-right tracking-wider">Command Actions</th> </tr>
+                </thead>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="text-xs text-gray-500 uppercase border-b border-gray-700">
+                                <th class="p-3">ID</th>
+                                <th class="p-3">Operator Name</th>
+                                <th class="p-3">Status</th>
+                                <th class="p-3">Lives</th>
+                                <th class="p-3 text-right">Override Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="student-table-body" class="text-sm font-mono text-gray-300">
+                            <tr>
+                                <td colspan="5" class="p-4 text-center text-gray-500 italic">Connecting to database...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="admin-toast" class="fixed bottom-4 right-4 bg-green-600 text-white px-6 py-3 rounded shadow-lg transform translate-y-20 transition-transform duration-300">
+        Action Successful
+    </div>
+
+    <script src="admin.js"></script>
+</body>
+</html>
