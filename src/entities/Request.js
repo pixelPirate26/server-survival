@@ -44,6 +44,10 @@ class Request {
         this.target = service;
         this.progress = 0;
         this.isMoving = true;
+
+        if (this.target && typeof this.target.incomingCount === 'number') {
+            this.target.incomingCount++;
+        }
     }
 
     update(dt) {
@@ -55,6 +59,10 @@ class Request {
                 this.mesh.position.copy(this.target.position);
                 this.mesh.position.y = 2;
 
+                if (this.target && typeof this.target.incomingCount === 'number') {
+                    this.target.incomingCount = Math.max(0, this.target.incomingCount - 1);
+                }
+                
                 // Use service-specific max queue size
                 const maxQueue = this.target.config.maxQueueSize || 20;
                 if (this.target.queue.length < maxQueue) {
@@ -75,5 +83,9 @@ class Request {
         requestGroup.remove(this.mesh);
         this.mesh.geometry.dispose();
         this.mesh.material.dispose();
+
+        if (this.isMoving && this.target && typeof this.target.incomingCount === 'number') {
+            this.target.incomingCount = Math.max(0, this.target.incomingCount - 1);
+        }
     }
 }
