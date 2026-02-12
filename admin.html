@@ -3,14 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SERVER: Admin Command</title>
+    <title>SERVER: Admin Console</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="style.css" />
     <script>
-        // Security Check: Kick out non-admins
-        const user = JSON.parse(sessionStorage.getItem('currentUser') || '{}');
-        if (user.username !== 'admin') {
-            window.location.href = 'index.html';
+        const user = JSON.parse(sessionStorage.getItem("currentUser") || "{}");
+        if (!sessionStorage.getItem("authToken") || user.role !== "admin") {
+            window.location.href = "login.html";
         }
     </script>
 </head>
@@ -20,49 +19,123 @@
         <div class="max-w-6xl mx-auto mb-8 flex justify-between items-end">
             <div>
                 <h1 class="text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-red-500 to-orange-400 tracking-tighter">
-                    ADMIN COMMAND
+                    ADMIN CONSOLE
                 </h1>
-                <p class="text-gray-400 font-mono text-sm">INSTRUCTOR OVERRIDE CONSOLE</p>
+                <p class="text-gray-400 font-mono text-sm">PLAYER MANAGEMENT + LEADERBOARD</p>
             </div>
-            <a href="index.html" class="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded border border-gray-600 font-mono text-sm transition">
-                Return to Game
-            </a>
+            <div class="flex gap-2">
+                <button onclick="adminDashboard.refreshData()" class="bg-blue-900/60 hover:bg-blue-700 text-blue-100 px-4 py-2 rounded border border-blue-500/30 font-mono text-sm transition">
+                    Refresh
+                </button>
+                <button onclick="adminDashboard.logout()" class="bg-gray-800 hover:bg-gray-700 text-white px-4 py-2 rounded border border-gray-600 font-mono text-sm transition">
+                    Logout
+                </button>
+            </div>
+        </div>
+
+        <div class="max-w-6xl mx-auto mb-6 flex flex-wrap gap-2">
+            <button data-tab="players" onclick="adminDashboard.showTab('players')"
+                class="px-4 py-2 rounded border border-blue-500/30 font-mono text-sm transition bg-blue-900/60 text-blue-100">
+                Players
+            </button>
+            <button data-tab="leaderboard" onclick="adminDashboard.showTab('leaderboard')"
+                class="px-4 py-2 rounded border border-purple-500/30 font-mono text-sm transition bg-gray-900/40 text-gray-300 hover:bg-purple-900/40 hover:text-purple-100">
+                Leaderboard
+            </button>
+            <button data-tab="runs" onclick="adminDashboard.showTab('runs')"
+                class="px-4 py-2 rounded border border-emerald-500/30 font-mono text-sm transition bg-gray-900/40 text-gray-300 hover:bg-emerald-900/40 hover:text-emerald-100">
+                Recent Runs
+            </button>
         </div>
 
         <div class="max-w-6xl mx-auto grid grid-cols-1 gap-6">
-            
-            <div class="glass-panel p-6 rounded-2xl border border-gray-700">
-                <div class="flex justify-between items-center mb-6">
-                    <h2 class="text-xl font-bold text-blue-400 flex items-center gap-2">
-                        <span>👥</span> Active Operators
-                    </h2>
-                    <button onclick="adminDashboard.refreshData()" class="text-xs bg-blue-900/50 hover:bg-blue-800 text-blue-200 px-3 py-1 rounded border border-blue-500/30 transition">
-                        ↻ Refresh Data
-                    </button>
+            <div id="players-panel" class="glass-panel p-6 rounded-2xl border border-gray-700">
+                <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+                    <h2 class="text-xl font-bold text-blue-300">Players</h2>
+                    <div class="flex items-center gap-2 font-mono text-xs">
+                        <button onclick="adminDashboard.lockSelected(true)" class="bg-red-900/60 hover:bg-red-700 text-red-100 px-3 py-2 rounded border border-red-500/30 transition">
+                            Lock Selected
+                        </button>
+                        <button onclick="adminDashboard.lockSelected(false)" class="bg-green-900/60 hover:bg-green-700 text-green-100 px-3 py-2 rounded border border-green-500/30 transition">
+                            Unlock Selected
+                        </button>
+                        <button onclick="adminDashboard.resetDeviceSelected()" class="bg-yellow-900/60 hover:bg-yellow-700 text-yellow-100 px-3 py-2 rounded border border-yellow-500/30 transition">
+                            Reset SSO Device
+                        </button>
+                        <button onclick="adminDashboard.unflagSelected()" class="bg-orange-900/60 hover:bg-orange-700 text-orange-100 px-3 py-2 rounded border border-orange-500/30 transition">
+                            Unflag Selected
+                        </button>
+                    </div>
                 </div>
-                <thead class="bg-gray-800/50 text-xs uppercase font-medium text-gray-400">
-                    <tr>
-                        <th class="px-6 py-3 text-left tracking-wider">ID</th>
-                        <th class="px-6 py-3 text-left tracking-wider">Operator Name</th>
-                        <th class="px-6 py-3 text-left tracking-wider">Status</th>
-                        <th class="px-6 py-3 text-left tracking-wider">Lives</th>
-                        <th class="px-6 py-3 text-right tracking-wider">Command Actions</th> </tr>
-                </thead>
-
                 <div class="overflow-x-auto">
                     <table class="w-full text-left border-collapse">
                         <thead>
                             <tr class="text-xs text-gray-500 uppercase border-b border-gray-700">
-                                <th class="p-3">ID</th>
-                                <th class="p-3">Operator Name</th>
-                                <th class="p-3">Status</th>
-                                <th class="p-3">Lives</th>
-                                <th class="p-3 text-right">Override Actions</th>
+                                <th class="p-3 w-10">
+                                    <input id="select-all" type="checkbox" onclick="adminDashboard.toggleSelectAll()" class="accent-cyan-400">
+                                </th>
+                                <th class="p-3">Player</th>
+                                <th class="p-3">Access</th>
+                                <th class="p-3">SSO Device</th>
+                                <th class="p-3">Flags</th>
+                                <th class="p-3 text-right">Lives</th>
+                                <th class="p-3 text-right">Start Budget</th>
+                                <th class="p-3 text-right">Best Score</th>
+                                <th class="p-3 text-right">Actions</th>
                             </tr>
                         </thead>
-                        <tbody id="student-table-body" class="text-sm font-mono text-gray-300">
+                        <tbody id="player-table-body" class="text-sm font-mono text-gray-300">
                             <tr>
-                                <td colspan="5" class="p-4 text-center text-gray-500 italic">Connecting to database...</td>
+                                <td colspan="9" class="p-4 text-center text-gray-500 italic">Loading players...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="leaderboard-panel" class="glass-panel p-6 rounded-2xl border border-gray-700 hidden">
+                <h2 class="text-xl font-bold text-purple-300 mb-4">Leaderboard</h2>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="text-xs text-gray-500 uppercase border-b border-gray-700">
+                                <th class="p-3">Rank</th>
+                                <th class="p-3">Player</th>
+                                <th class="p-3 text-right">Best Score</th>
+                                <th class="p-3 text-right">Best Time (s)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="leaderboard-table-body" class="text-sm font-mono text-gray-300">
+                            <tr>
+                                <td colspan="4" class="p-4 text-center text-gray-500 italic">Loading leaderboard...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="runs-panel" class="glass-panel p-6 rounded-2xl border border-gray-700 hidden">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-xl font-bold text-emerald-300">Recent Runs</h2>
+                    <button onclick="adminDashboard.refreshRuns()" class="bg-emerald-900/60 hover:bg-emerald-700 text-emerald-100 px-4 py-2 rounded border border-emerald-500/30 font-mono text-sm transition">
+                        Refresh Runs
+                    </button>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr class="text-xs text-gray-500 uppercase border-b border-gray-700">
+                                <th class="p-3">When</th>
+                                <th class="p-3">Player</th>
+                                <th class="p-3 text-right">Score</th>
+                                <th class="p-3 text-right">Time (s)</th>
+                                <th class="p-3 text-right">Events</th>
+                                <th class="p-3 text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="runs-table-body" class="text-sm font-mono text-gray-300">
+                            <tr>
+                                <td colspan="6" class="p-4 text-center text-gray-500 italic">Loading runs...</td>
                             </tr>
                         </tbody>
                     </table>
@@ -71,8 +144,63 @@
         </div>
     </div>
 
-    <div id="admin-toast" class="fixed bottom-4 right-4 bg-green-600 text-white px-6 py-3 rounded shadow-lg transform translate-y-20 transition-transform duration-300">
+    <div id="admin-toast" class="fixed bottom-4 right-4 bg-green-600 text-white px-6 py-3 rounded shadow-lg transform translate-y-24 transition-transform duration-300 z-50">
         Action Successful
+    </div>
+
+    <div id="run-detail-modal" class="hidden fixed inset-0 z-[80] bg-black/85 backdrop-blur-sm flex items-center justify-center p-6">
+        <div class="glass-panel rounded-2xl p-6 border border-emerald-500/30 w-full max-w-5xl max-h-[90vh] overflow-y-auto">
+            <div class="flex items-center justify-between mb-4 border-b border-gray-700 pb-3">
+                <h3 class="text-xl font-bold text-emerald-300">Run Replay Summary</h3>
+                <div class="flex items-center gap-2">
+                    <button id="run-detail-toggle" onclick="adminDashboard.toggleRunRaw()" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-1 rounded border border-gray-600">
+                        Show Raw JSON
+                    </button>
+                    <button onclick="adminDashboard.closeRunDetail()" class="text-gray-400 hover:text-white transition">Close</button>
+                </div>
+            </div>
+
+            <div id="run-detail-summary" class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6"></div>
+
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <div class="bg-gray-900/70 border border-gray-700 rounded-lg p-4">
+                    <h4 class="text-sm font-bold text-emerald-200 mb-2">Setup</h4>
+                    <div id="run-detail-setup" class="text-xs text-gray-300 font-mono"></div>
+                </div>
+                <div class="bg-gray-900/70 border border-gray-700 rounded-lg p-4">
+                    <h4 class="text-sm font-bold text-emerald-200 mb-2">Failures</h4>
+                    <div id="run-detail-failures" class="text-xs text-gray-300 font-mono"></div>
+                </div>
+            </div>
+
+            <div class="bg-gray-900/70 border border-gray-700 rounded-lg p-4 mb-6">
+                <div class="flex items-center justify-between mb-3">
+                    <h4 class="text-sm font-bold text-emerald-200">Timeline (per-second buckets)</h4>
+                    <div id="run-detail-timeline-meta" class="text-xs text-gray-400 font-mono"></div>
+                </div>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-xs font-mono text-gray-200">
+                        <thead>
+                            <tr class="text-gray-500 uppercase border-b border-gray-700">
+                                <th class="py-2 text-left">t (s)</th>
+                                <th class="py-2 text-right">Total</th>
+                                <th class="py-2 text-right">Storage</th>
+                                <th class="py-2 text-right">Database</th>
+                                <th class="py-2 text-right">Blocked</th>
+                                <th class="py-2 text-right">Failures</th>
+                            </tr>
+                        </thead>
+                        <tbody id="run-detail-timeline-body">
+                            <tr>
+                                <td colspan="6" class="py-4 text-center text-gray-500">No timeline data.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <pre id="run-detail-raw" class="hidden text-xs text-gray-200 font-mono whitespace-pre-wrap"></pre>
+        </div>
     </div>
 
     <script src="admin.js"></script>
