@@ -17,34 +17,386 @@ function formatTime(totalSeconds) {
     }
 }
 
-// CONFIG: Match this to admin.js
-const DB_SERVER_URL = ""; // e.g. "https://api.myserver.com"
+const API_BASE_URL = window.SERVER_API_URL
 
-async function syncPlayerState() {
-    if (!DB_SERVER_URL) return; // Skip if no server connected
-
+function getCurrentUser() {
     try {
-        const user = JSON.parse(sessionStorage.getItem('currentUser'));
-        if (!user) return;
-
-        // FETCH: Get latest lives from DB
-        const response = await fetch(`${DB_SERVER_URL}/players/${user.username}/state`);
-        if (response.ok) {
-            const data = await response.json();
-            
-            // UPDATE: If admin restored lives, update local state
-            if (data.lives !== undefined) {
-                STATE.lives = data.lives;
-                updateLivesUI(); // Refresh the hearts on screen
-                console.log("Synced with Server: Lives =", STATE.lives);
-            }
-        }
-    } catch (e) {
-        console.warn("Could not sync with DB server:", e);
+        return JSON.parse(sessionStorage.getItem("currentUser") || "{}");
+    } catch (error) {
+        return {};
     }
 }
 
-// ==================== NEW SURVIVAL & EXPORT FEATURES ====================
+function isAdminUser() {
+    return getCurrentUser()?.role === "admin";
+}
+
+function setupPlayerRestrictions() {
+    if (isAdminUser()) {
+        return;
+    }
+
+    document.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+    });
+
+    document.addEventListener("keydown", (event) => {
+        const key = String(event.key || "").toLowerCase();
+        const meta = event.metaKey || event.ctrlKey;
+        const shift = event.shiftKey;
+
+        if (key === "f12") {
+            event.preventDefault();
+        }
+
+        if (meta && shift && ["i", "j", "c"].includes(key)) {
+            event.preventDefault();
+        }
+
+        if (meta && key === "u") {
+            event.preventDefault();
+        }
+    });
+}
+
+setupPlayerRestrictions();
+
+function getAuthToken() {
+    return sessionStorage.getItem("authToken");
+}
+
+function clearSessionAndRedirect() {
+    sessionStorage.removeItem("authToken");
+    sessionStorage.removeItem("currentUser");
+    window.location.href = "login.html";
+}
+
+window.logout = () => {
+    clearSessionAndRedirect();
+};
+
+async function apiRequest(path, options = {}) {
+    const headers = {
+        ...(options.headers || {}),
+    };
+
+    if (!(options.body instanceof FormData)) {
+        headers["Content-Type"] = headers["Content-Type"] || "application/json";
+    }
+
+    const token = getAuthToken();
+    if (token) {
+        headers.Authorization = `Bearer ${token}`;
+    }
+
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+        ...options,
+        headers,
+    });
+
+    const payload = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+        const error = new Error(payload.message || "Request failed");
+        error.status = response.status;
+        throw error;
+    }
+
+    return payload;
+}
+
+function updateStartButtonAvailability() {
+    const startBtn = document.getElementById("start-survival-btn");
+    if (!startBtn) return;
+
+    const livesRemaining = Number.isFinite(STATE.lives) ? STATE.lives : 0;
+    const hasLives = livesRemaining > 0;
+
+    startBtn.disabled = !hasLives;
+    startBtn.classList.toggle("opacity-40", !hasLives);
+    startBtn.classList.toggle("cursor-not-allowed", !hasLives);
+    startBtn.textContent = hasLives ? "Start Survival" : "No Lives Remaining";
+}
+
+function renderLeaderboardRows(rows) {
+    const tableBody = document.getElementById("leaderboard-table-body");
+    if (!tableBody) return;
+
+    if (!rows.length) {
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="4" class="py-4 text-center text-gray-500">No scores submitted yet.</td>
+            </tr>
+        `;
+        return;
+    }
+
+    tableBody.innerHTML = rows
+        .map(
+            (row) => `
+            <tr class="border-b border-gray-800">
+                <td class="py-2 text-left">${row.rank}</td>
+                <td class="py-2 text-left">${row.username}</td>
+                <td class="py-2 text-right">${row.bestScore}</td>
+                <td class="py-2 text-right">${row.bestSurvivalSeconds}</td>
+            </tr>
+        `
+        )
+        .join("");
+}
+
+window.showLeaderboard = async () => {
+    const modal = document.getElementById("leaderboard-modal");
+    const tableBody = document.getElementById("leaderboard-table-body");
+    if (!modal || !tableBody) return;
+
+    const gameOverModal = document.getElementById("modal");
+    const mainMenuModal = document.getElementById("main-menu-modal");
+    const gameOverVisible = gameOverModal && !gameOverModal.classList.contains("hidden");
+    const menuVisible = mainMenuModal && !mainMenuModal.classList.contains("hidden");
+
+    if (gameOverVisible) {
+        window.leaderboardReturnTarget = "gameover";
+        gameOverModal.classList.add("hidden");
+    } else if (menuVisible) {
+        window.leaderboardReturnTarget = "menu";
+        mainMenuModal.classList.add("hidden");
+    } else {
+        window.leaderboardReturnTarget = null;
+    }
+
+    modal.classList.remove("hidden");
+    tableBody.innerHTML = `
+        <tr>
+            <td colspan="4" class="py-4 text-center text-gray-500">Loading leaderboard...</td>
+        </tr>
+    `;
+
+    try {
+        const payload = await apiRequest("/leaderboard?limit=20", { method: "GET" });
+        renderLeaderboardRows(payload.leaderboard || []);
+    } catch (error) {
+        tableBody.innerHTML = `
+            <tr>
+                <td colspan="4" class="py-4 text-center text-red-400">${error.message}</td>
+            </tr>
+        `;
+    }
+};
+
+window.closeLeaderboard = () => {
+    const leaderboard = document.getElementById("leaderboard-modal");
+    if (leaderboard) {
+        leaderboard.classList.add("hidden");
+    }
+
+    if (window.leaderboardReturnTarget === "gameover") {
+        document.getElementById("modal")?.classList.remove("hidden");
+    } else if (window.leaderboardReturnTarget === "menu") {
+        document.getElementById("main-menu-modal")?.classList.remove("hidden");
+    }
+
+    window.leaderboardReturnTarget = null;
+};
+
+async function syncPlayerState() {
+    try {
+        const payload = await apiRequest("/players/me", { method: "GET" });
+        const user = payload.user;
+
+        if (!user) return;
+
+        sessionStorage.setItem("currentUser", JSON.stringify(user));
+        STATE.lives = user.lives;
+        STATE.playerStartingBudget = user.startingBudget;
+        const usernameEl = document.getElementById("student-username-display");
+        if (usernameEl) {
+            usernameEl.textContent = String(user.username || "PLAYER").toUpperCase();
+        }
+        updateLivesUI();
+        updateStartButtonAvailability();
+    } catch (error) {
+        if (error.status === 401) {
+            clearSessionAndRedirect();
+            return;
+        }
+
+        console.warn("Could not sync player state:", error.message);
+    }
+}
+
+function captureRunSnapshot(reason) {
+    const savedServices = STATE.services.map((s) => ({
+        type: s.type,
+        position: { x: s.position.x, y: s.position.y, z: s.position.z },
+        cost: s.config?.cost ?? null,
+        tier: s.tier ?? null,
+    }));
+
+    const savedConnections = STATE.connections.map((c) => ({
+        from:
+            c.from === "internet"
+                ? "internet"
+                : STATE.services.findIndex((s) => s.id === c.from),
+        to:
+            c.to === "internet"
+                ? "internet"
+                : STATE.services.findIndex((s) => s.id === c.to),
+    }));
+
+    return {
+        mode: STATE.gameMode,
+        reason,
+        failures: { ...STATE.failures },
+        setup: {
+            money: STATE.money,
+            reputation: STATE.reputation,
+            autoRepairEnabled: STATE.autoRepairEnabled === true,
+            upkeepEnabled: STATE.upkeepEnabled !== false,
+            services: savedServices,
+            connections: savedConnections,
+        },
+    };
+}
+
+async function startRunSession() {
+    if (STATE.isTutorialMode) {
+        return;
+    }
+
+    try {
+        const payload = await apiRequest("/runs/session", {
+            method: "POST",
+            body: JSON.stringify({ mode: STATE.gameMode }),
+        });
+        STATE.runSessionId = payload.sessionId;
+        STATE.runEvents = [];
+        STATE.runEventQueue = [];
+        if (STATE.runEventFlushTimer) {
+            clearInterval(STATE.runEventFlushTimer);
+        }
+        STATE.runEventFlushTimer = setInterval(() => {
+            void flushRunEvents(false);
+        }, 3000);
+    } catch (error) {
+        console.warn("Failed to start run session:", error.message);
+        STATE.runSessionId = null;
+        STATE.runEvents = [];
+        STATE.runEventQueue = [];
+    }
+}
+
+function logRunEvent(req, outcome) {
+    if (STATE.isTutorialMode || !STATE.runSessionId) {
+        return;
+    }
+    const timestamp = Date.now();
+    if (!STATE.runEvents) {
+        STATE.runEvents = [];
+    }
+    if (!STATE.runEventQueue) {
+        STATE.runEventQueue = [];
+    }
+    STATE.runEvents.push({
+        type: req?.type || "UNKNOWN",
+        outcome,
+        ts: timestamp,
+    });
+    STATE.runEventQueue.push({
+        type: req?.type || "UNKNOWN",
+        outcome,
+        ts: timestamp,
+    });
+}
+
+async function flushRunEvents(forceAll) {
+    if (!STATE.runSessionId || !STATE.runEventQueue) {
+        return;
+    }
+
+    if (STATE.runEventFlushInFlight) {
+        if (STATE.runEventFlushPromise) {
+            await STATE.runEventFlushPromise;
+        }
+        return;
+    }
+
+    if (!STATE.runEventQueue.length) {
+        return;
+    }
+
+    STATE.runEventFlushInFlight = true;
+    STATE.runEventFlushPromise = (async () => {
+        try {
+            while (STATE.runEventQueue.length) {
+                const batchSize = forceAll ? 1000 : 200;
+                const batch = STATE.runEventQueue.splice(0, batchSize);
+                if (!batch.length) {
+                    break;
+                }
+
+                await apiRequest("/runs/event", {
+                    method: "POST",
+                    body: JSON.stringify({
+                        sessionId: STATE.runSessionId,
+                        events: batch,
+                    }),
+                });
+
+                if (!forceAll) {
+                    break;
+                }
+            }
+        } catch (error) {
+            console.warn("Failed to flush run events:", error.message);
+        }
+    })();
+
+    try {
+        await STATE.runEventFlushPromise;
+    } finally {
+        STATE.runEventFlushInFlight = false;
+        STATE.runEventFlushPromise = null;
+    }
+}
+
+async function persistRunAndLifeLoss(runSnapshot) {
+    try {
+        await flushRunEvents(true);
+        await apiRequest("/runs/submit", {
+            method: "POST",
+            body: JSON.stringify({
+                ...runSnapshot,
+                sessionId: STATE.runSessionId,
+                events: STATE.runEvents || [],
+                claimedScore: Math.floor(STATE.score.total),
+            }),
+        });
+    } catch (error) {
+        console.warn("Failed to submit run:", error.message);
+    }
+    if (STATE.runEventFlushTimer) {
+        clearInterval(STATE.runEventFlushTimer);
+        STATE.runEventFlushTimer = null;
+    }
+
+    try {
+        const payload = await apiRequest("/players/me/lose-life", {
+            method: "POST",
+        });
+        if (payload.user) {
+            STATE.lives = payload.user.lives;
+            STATE.playerStartingBudget = payload.user.startingBudget;
+            sessionStorage.setItem("currentUser", JSON.stringify(payload.user));
+            updateLivesUI();
+            updateStartButtonAvailability();
+        }
+    } catch (error) {
+        console.warn("Failed to persist life loss:", error.message);
+    }
+}
+
+// ==================== SURVIVAL STATE UI ====================
 
 function updateLivesUI() {
     const display = document.getElementById('livesDisplay');
@@ -62,49 +414,6 @@ function updateLivesUI() {
         // Default to 3 lives if undefined
         const currentLives = typeof STATE.lives !== 'undefined' ? STATE.lives : 3;
         display.innerText = '❤️'.repeat(Math.max(0, currentLives));
-    }
-}
-
-function exportFinalPlayerData(reason) {
-    // Get user info (fallback to Guest if not found)
-    const user = JSON.parse(sessionStorage.getItem('currentUser') || '{"username":"Guest", "role":"Player"}');
-    
-    const data = {
-        session: {
-            player: user.username,
-            role: user.role,
-            reason: reason,
-            timestamp: new Date().toISOString(),
-            duration: formatTime(STATE.elapsedGameTime || 0)
-        },
-        metrics: {
-            finalScore: STATE.score.total,
-            money: STATE.money,
-            reputation: STATE.reputation,
-            requestsProcessed: STATE.requestsProcessed,
-            failures: STATE.failures
-        },
-        infrastructure: STATE.services.map(s => ({
-            type: s.type,
-            tier: s.tier || 1,
-            health: Math.round(s.health),
-            position: { x: s.position.x, z: s.position.z }
-        })),
-        finances: STATE.finances
-    };
-
-    try {
-        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = `survival_stats_${user.username}_${Date.now()}.json`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        console.log("Game data exported successfully.");
-    } catch (e) {
-        console.error("Failed to export game data:", e);
     }
 }
 
@@ -978,6 +1287,14 @@ function resetGame(mode = "survival", isTutorial = false) {
     STATE.sound.init();
     STATE.sound.playGameBGM();
     STATE.gameMode = mode;
+    if (isTutorial) {
+        STATE.runSessionId = null;
+        STATE.runEvents = [];
+        STATE.runEventQueue = [];
+    } else {
+        STATE.runEvents = [];
+        STATE.runEventQueue = [];
+    }
 
     // Initialize lives for survival mode
     if (typeof STATE.lives === 'undefined' || mode !== 'survival') {
@@ -999,7 +1316,11 @@ function resetGame(mode = "survival", isTutorial = false) {
         STATE.money = 2000;
         STATE.isTutorialMode = true;
     } else {
-        STATE.money = CONFIG.survival.startBudget;
+        const startingBudget =
+            Number.isFinite(STATE.playerStartingBudget) && STATE.playerStartingBudget > 0
+                ? STATE.playerStartingBudget
+                : CONFIG.survival.startBudget;
+        STATE.money = startingBudget;
         STATE.isTutorialMode = false;
     }
 
@@ -1282,16 +1603,22 @@ window.showGameOver = (isFinalLoss, failureReason) => {
 
     if (isFinalLoss) {
         // --- CASE: 0 LIVES LEFT ---
-        // Button: Main Menu
+        const leaderboardBtn = document.createElement("button");
+        leaderboardBtn.className = "bg-purple-600 hover:bg-purple-500 text-white font-bold py-3 px-8 rounded-lg shadow-lg w-full font-mono uppercase text-sm transform transition hover:scale-105";
+        leaderboardBtn.textContent = "View Leaderboard";
+        leaderboardBtn.onclick = () => {
+            window.showLeaderboard();
+        };
+
         const menuBtn = document.createElement("button");
         menuBtn.className = "bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-8 rounded-lg shadow-lg w-full font-mono uppercase text-sm transform transition hover:scale-105";
         menuBtn.textContent = "Return to Main Menu";
         menuBtn.onclick = () => {
-            exportFinalPlayerData(finalReason);
-            STATE.lives = 3; 
             modal.classList.add("hidden");
             openMainMenu();
         };
+        actionsEl.className = "flex flex-col justify-center gap-3 w-full";
+        actionsEl.appendChild(leaderboardBtn);
         actionsEl.appendChild(menuBtn);
 
     } else {
@@ -1306,17 +1633,17 @@ window.showGameOver = (isFinalLoss, failureReason) => {
             restartGame(); 
         };
 
-        // Button 2: Tutorial (Cyan)
-        const tutorialBtn = document.createElement("button");
-        tutorialBtn.className = "bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105 border border-cyan-400/30";
-        tutorialBtn.textContent = "Tutorial";
-        tutorialBtn.onclick = () => {
-            modal.classList.add("hidden");
-            startTutorial(); // Launches the tutorial mode
+        // Button 2: Leaderboard
+        const leaderboardBtn = document.createElement("button");
+        leaderboardBtn.className = "bg-purple-600 hover:bg-purple-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105 border border-purple-400/30";
+        leaderboardBtn.textContent = "View Leaderboard";
+        leaderboardBtn.onclick = () => {
+            window.showLeaderboard();
         };
 
+        actionsEl.className = "flex justify-center gap-4 w-full";
         actionsEl.appendChild(retryBtn);
-        actionsEl.appendChild(tutorialBtn);
+        actionsEl.appendChild(leaderboardBtn);
     }
     
     modal.classList.remove("hidden");
@@ -1519,6 +1846,8 @@ function updateScore(req, outcome) {
     const points = CONFIG.survival.SCORE_POINTS;
     const typeConfig = req.typeConfig || CONFIG.trafficTypes[req.type];
 
+    logRunEvent(req, outcome);
+
     if (outcome === "MALICIOUS_BLOCKED") {
         STATE.score.maliciousBlocked += points.MALICIOUS_BLOCKED_SCORE;
         STATE.score.total += points.MALICIOUS_BLOCKED_SCORE;
@@ -1632,12 +1961,16 @@ function showMainMenu() {
     document.getElementById("main-menu-modal").classList.remove("hidden");
     document.getElementById("faq-modal").classList.add("hidden");
     document.getElementById("modal").classList.add("hidden");
+    document.getElementById("leaderboard-modal")?.classList.add("hidden");
 
     const loadBtn = document.getElementById("load-btn");
     const hasSave = localStorage.getItem("serverSurvivalSave") !== null;
     if (loadBtn) {
         loadBtn.style.display = hasSave ? "block" : "none";
     }
+
+    updateStartButtonAvailability();
+    void syncPlayerState();
 }
 
 let faqSource = "menu";
@@ -1675,15 +2008,21 @@ window.togglePanel = (contentId, iconId) => {
     }
 };
 
-window.startGame = () => {
-    document.getElementById("main-menu-modal").classList.add("hidden");
-    
-    // FIX: Only reset lives to 3 if we are dead or fresh start. 
-    // This allows preserving lives (e.g., 2/3) when returning from menu/tutorial.
-    if (typeof STATE.lives === 'undefined' || STATE.lives <= 0) {
-        STATE.lives = 3;
+window.startGame = async () => {
+    if (STATE.pendingLifeSync) {
+        await STATE.pendingLifeSync;
     }
-    
+
+    await syncPlayerState();
+
+    if (!Number.isFinite(STATE.lives) || STATE.lives <= 0) {
+        alert("No lives remaining. Ask an admin to add more lives.");
+        openMainMenu();
+        return;
+    }
+
+    document.getElementById("main-menu-modal").classList.add("hidden");
+    await startRunSession();
     resetGame("survival", false);
 };
 
@@ -2742,11 +3081,17 @@ function animate(time) {
         clearActiveGameEvents();
 
         // 3. Handle Lives
+        const runSnapshot = captureRunSnapshot(reason);
         if (typeof STATE.lives === 'undefined') STATE.lives = 3;
-        STATE.lives--;
+        STATE.lives = Math.max(0, STATE.lives - 1);
         
         // Update Stats UI if available
         if(typeof updateLivesUI === 'function') updateLivesUI();
+        updateStartButtonAvailability();
+
+        STATE.pendingLifeSync = persistRunAndLifeLoss(runSnapshot).finally(() => {
+            STATE.pendingLifeSync = null;
+        });
 
         if (STATE.lives > 0) {
             // Life Lost: Show UI with "Start Again"
@@ -2917,7 +3262,10 @@ function openMainMenu() {
     }
 
     document.getElementById("main-menu-modal").classList.remove("hidden");
+    document.getElementById("leaderboard-modal")?.classList.add("hidden");
     STATE.sound.playMenuBGM();
+    updateStartButtonAvailability();
+    void syncPlayerState();
 }
 
 window.resumeGame = () => {

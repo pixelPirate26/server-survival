@@ -1,19 +1,22 @@
 {
   "users": [
     {
+      "id": 1,
       "username": "admin",
       "password": "adminpassword",
-      "id": 1
+      "role": "admin"
     },
     {
-      "username": "operator",
-      "password": "user123",
-      "id": 2
-    },
-    {
+      "id": 2,
       "username": "player1",
       "password": "p1",
-      "id": 3
+      "role": "player"
+    },
+    {
+      "id": 3,
+      "username": "player2",
+      "password": "p2",
+      "role": "player"
     }
   ]
 }
