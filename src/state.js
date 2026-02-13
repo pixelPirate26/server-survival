@@ -3,6 +3,8 @@ const STATE = {
     reputation: 0,
     requestsProcessed: 0,
     lives: 3,
+    playerStartingBudget: null,
+    pendingLifeSync: null,
     gameStartedAt: new Date().toISOString(),
 
     score: {

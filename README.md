@@ -144,8 +144,19 @@ A fully customizable testing environment for experimenting with any architecture
 ## Getting Started
 
 1.  Clone the repository.
-2.  Open `index.html` in your modern web browser.
-3.  Start building your cloud empire!
+2.  Configure backend endpoint for frontend API calls:
+    ```bash
+    cp .env.example .env
+    node scripts/generate-env-config.js
+    ```
+3.  Open `index.html` in your modern web browser.
+4.  Start building your cloud empire!
+
+### Frontend API Endpoint
+
+- Set `SERVER_API_URL` in `frontend/.env` (example: `http://localhost:8787/api`).
+- Run `node scripts/generate-env-config.js` to regenerate `frontend/env-config.js`.
+- On deployment, set `SERVER_API_URL` for the target backend and regenerate once before publishing static files.
 
 ## Community
 

@@ -9,7 +9,7 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
   <script>
     // Session Guard: Redirect to login if no session exists
-    if (!sessionStorage.getItem('currentUser')) {
+    if (!sessionStorage.getItem('currentUser') || !sessionStorage.getItem('authToken')) {
         window.location.href = 'login.html';
     }
 </script>
@@ -145,7 +145,7 @@
     <div class="absolute top-4 right-64 mr-4 glass-panel rounded-xl p-3 px-6 pointer-events-auto flex items-center gap-3 border border-blue-500/30">
           <div class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
           <div>
-              <div class="text-[10px] text-gray-500 font-mono uppercase tracking-widest">Operator Identity</div>
+              <div class="text-[10px] text-gray-500 font-mono uppercase tracking-widest">Player</div>
               <div id="student-username-display" class="text-cyan-400 font-bold font-mono text-lg tracking-wider">GUEST</div>
           </div>
       </div>
@@ -567,9 +567,14 @@
           Start Tutorial
         </button>
 
-        <button onclick="startGame()"
+        <button id="start-survival-btn" onclick="startGame()"
           class="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-4 px-8 rounded-lg shadow-lg transform transition hover:scale-105 font-mono uppercase text-lg border border-green-400/50">
           Start Survival
+        </button>
+
+        <button onclick="showLeaderboard()"
+          class="w-full bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-8 rounded-lg shadow-lg transform transition hover:scale-105 font-mono uppercase text-lg border border-purple-400/50">
+          View Leaderboard
         </button>
 
         <!-- <button onclick="loadGameState()" id="load-btn"
@@ -581,9 +586,42 @@
           class="w-full bg-gray-800 hover:bg-gray-700 text-gray-300 font-bold py-3 px-8 rounded-lg border border-gray-600 transition hover:text-white font-mono uppercase">
           Manual / FAQ
         </button>
+
+        <button onclick="logout()"
+          class="w-full bg-red-900/60 hover:bg-red-700 text-red-100 font-bold py-3 px-8 rounded-lg border border-red-500/40 transition font-mono uppercase">
+          Logout
+        </button>
       </div>
 
       <div class="mt-8 text-xs text-gray-500 font-mono"></div>
+    </div>
+  </div>
+
+  <!-- Leaderboard Modal -->
+  <div id="leaderboard-modal" class="hidden fixed inset-0 z-[70] bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="glass-panel rounded-2xl p-6 border border-purple-500/30 w-full max-w-2xl">
+      <div class="flex items-center justify-between mb-4 border-b border-gray-700 pb-3">
+        <h3 class="text-xl font-bold text-purple-300">Global Leaderboard</h3>
+        <button onclick="closeLeaderboard()" class="text-gray-400 hover:text-white transition">Back</button>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm font-mono">
+          <thead>
+            <tr class="text-gray-500 text-xs uppercase border-b border-gray-700">
+              <th class="py-2 text-left">Rank</th>
+              <th class="py-2 text-left">Player</th>
+              <th class="py-2 text-right">Best Score</th>
+              <th class="py-2 text-right">Best Time (s)</th>
+            </tr>
+          </thead>
+          <tbody id="leaderboard-table-body" class="text-gray-200">
+            <tr>
+              <td colspan="4" class="py-4 text-center text-gray-500">Loading leaderboard...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </div>
 
@@ -913,6 +951,8 @@
   <script src="src/entities/Service.js"></script>
   <script src="src/services/SoundService.js"></script>
   <script src="src/tutorial.js"></script>
+  <script src="env-config.js"></script>
+  <script src="app-config.js"></script>
   <script src="game.js"></script>
 </body>
 
