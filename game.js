@@ -1833,6 +1833,11 @@ function spawnRequest() {
             target = entryNodes.find((s) => s?.type === "waf");
         }
 
+        // 3. Fallback to API Gateway (Rate Limiting)
+        if (!target) {
+            target = entryNodes.find((s) => s?.type === "apigw");
+        }
+        
         if (!target) {
             target = entryNodes[Math.floor(Math.random() * entryNodes.length)];
         }
@@ -1909,7 +1914,12 @@ function updateScore(req, outcome) {
                 (STATE.finances.income.countByType[reqType] || 0) + 1;
         }
         STATE.reputation += points.SUCCESS_REPUTATION || 0.5;
-    } else if (outcome === "FAILED") {
+    } 
+    else if (outcome === "THROTTLED") {
+        // Soft fail from API Gateway rate limiting — much less reputation loss
+        STATE.reputation += points.THROTTLED_REPUTATION || -0.2;
+    }
+    else if (outcome === "FAILED") {
         STATE.reputation += points.FAIL_REPUTATION;
         STATE.score.total -= (typeConfig.score || 5) / 2;
         if (STATE.failures[req.type] !== undefined) {
@@ -1932,6 +1942,13 @@ function failRequest(req) {
     updateScore(req, failType);
     STATE.sound.playFail();
     req.mesh.material.color.setHex(CONFIG.colors.requestFail);
+    setTimeout(() => removeRequest(req), 500);
+}
+
+function throttleRequest(req) {
+    updateScore(req, "THROTTLED");
+    STATE.sound.playFail();
+    req.mesh.material.color.setHex(CONFIG.colors.apigw); // Pink flash for throttled
     setTimeout(() => removeRequest(req), 500);
 }
 
@@ -2100,6 +2117,15 @@ function createConnection(fromId, toId) {
     else if (t1 === "compute" && (t2 === "db" || t2 === "s3")) valid = true;
     else if (t1 === "internet" && t2 === "cdn") valid = true;
     else if (t1 === "cdn" && t2 === "s3") valid = true;
+    // API Gateway connections
+    else if (t1 === "internet" && t2 === "apigw") valid = true;
+    else if (t1 === "waf" && t2 === "apigw") valid = true;
+    else if (t1 === "apigw" && t2 === "alb") valid = true;
+    else if (t1 === "apigw" && t2 === "sqs") valid = true;
+    else if (t1 === "apigw" && t2 === "compute") valid = true;
+    // NoSQL connections
+    else if (t1 === "compute" && t2 === "nosql") valid = true;
+    else if (t1 === "cache" && t2 === "nosql") valid = true;
 
     if (!valid) {
         new Audio("assets/sounds/click-9.mp3").play();
@@ -2430,14 +2456,18 @@ container.addEventListener("mousedown", (e) => {
             new Audio("assets/sounds/click-5.mp3").play();
         }
     } else if (
-        ["waf", "alb", "lambda", "db", "s3", "sqs", "cache", "cdn"].includes(
+        ["waf", "alb", "lambda", "db", "nosql", "s3", "sqs", "cache", "cdn", "apigw"].includes(
             STATE.activeTool
         )
     ) {
+         // Handle upgrades for compute, db, cache, apigw, and nosql
         if (
             (STATE.activeTool === "lambda" && i.type === "service") ||
             (STATE.activeTool === "db" && i.type === "service") ||
             (STATE.activeTool === "cache" && i.type === "service")
+            (STATE.activeTool === "cache" && i.type === "service") ||
+            (STATE.activeTool === "apigw" && i.type === "service") ||
+            (STATE.activeTool === "nosql" && i.type === "service")
         ) {
             const svc = STATE.services.find((s) => s.id === i.id);
             if (
@@ -2445,6 +2475,9 @@ container.addEventListener("mousedown", (e) => {
                 ((STATE.activeTool === "lambda" && svc.type === "compute") ||
                     (STATE.activeTool === "db" && svc.type === "db") ||
                     (STATE.activeTool === "cache" && svc.type === "cache"))
+                    (STATE.activeTool === "cache" && svc.type === "cache") ||
+                    (STATE.activeTool === "apigw" && svc.type === "apigw") ||
+                    (STATE.activeTool === "nosql" && svc.type === "nosql"))
             ) {
                 svc.upgrade();
                 return;
@@ -2456,9 +2489,11 @@ container.addEventListener("mousedown", (e) => {
                 alb: "alb",
                 lambda: "compute",
                 db: "db",
+                nosql: "nosql",
                 s3: "s3",
                 sqs: "sqs",
                 cache: "cache",
+                apigw: "apigw",
                 cdn: "cdn",
             };
 
@@ -2599,7 +2634,14 @@ container.addEventListener("mousemove", (e) => {
 
             content += `<div class="mt-1 border-t border-gray-700 pt-1">`;
 
-            if (s.type === "cache") {
+            if (s.type === "apigw") {
+                const rateLimit = s.config.rateLimit || 20;
+                const rateUsed = s.rateCounter || 0;
+                const rateColor = rateUsed > rateLimit ? "text-red-400" : rateUsed > rateLimit * 0.7 ? "text-yellow-400" : "text-green-400";
+                content += `${i18n.t('queue_label')} <span class="${loadColor}">${s.queue.length}</span><br>
+                ${i18n.t('load_label')} <span class="${loadColor}">${s.processing.length}/${s.config.capacity}</span><br>
+                ${i18n.t('rate_limit_label')} <span class="${rateColor}">${rateUsed}/${rateLimit} RPS</span>`;
+            } else if (s.type === "cache") {
                 const hitRate = Math.round((s.config.cacheHitRate || 0.35) * 100);
                 content += `Queue: <span class="${loadColor}">${s.queue.length}</span><br>
                 Load: <span class="${loadColor}">${s.processing.length}/${s.config.capacity}</span><br>
@@ -2624,10 +2666,14 @@ container.addEventListener("mousemove", (e) => {
             }
             content += `</div>`;
 
+            // Show upgrade option for upgradeable services
             if (
                 (STATE.activeTool === "lambda" && s.type === "compute") ||
                 (STATE.activeTool === "db" && s.type === "db") ||
                 (STATE.activeTool === "cache" && s.type === "cache")
+                (STATE.activeTool === "cache" && s.type === "cache") ||
+                (STATE.activeTool === "apigw" && s.type === "apigw") ||
+                (STATE.activeTool === "nosql" && s.type === "nosql")
             ) {
                 const tiers = CONFIG.services[s.type].tiers;
                 if (s.tier < tiers.length) {
@@ -2641,7 +2687,7 @@ container.addEventListener("mousemove", (e) => {
                 }
             }
 
-            if (["compute", "db", "cache"].includes(s.type)) {
+            if (["compute", "db", "cache", "apigw", "nosql"].includes(s.type)) {
                 const tiers = CONFIG.services[s.type].tiers;
                 if (s.tier < tiers.length) {
                     if (hideUpgradeTimer) {
@@ -2724,7 +2770,7 @@ function showTooltip(x, y, html) {
 }
 
 function setupUITooltips() {
-    const tools = ["waf", "sqs", "alb", "lambda", "db", "cache", "s3", "cdn"];
+    const tools = ["waf", "apigw", "sqs", "alb", "lambda", "db", "nosql", "cache", "s3", "cdn"];
     tools.forEach((toolId) => {
         const btn = document.getElementById(`tool-${toolId}`);
         if (!btn) return;
@@ -3182,6 +3228,14 @@ function analyzeFailure() {
 
     if (!STATE.services.some((s) => s.type === "cache")) {
         result.tips.push("Add Cache to improve hit rates and reduce DB load");
+    }
+    if (!STATE.services.some((s) => s.type === "apigw")) {
+        result.tips.push(i18n.t('tip_apigw'));
+    }
+
+    if (!STATE.services.some((s) => s.type === "nosql") &&
+        (STATE.failures.READ > 5 || STATE.failures.WRITE > 5)) {
+        result.tips.push(i18n.t('tip_nosql'));
     }
 
     result.tips = result.tips.slice(0, 4);
