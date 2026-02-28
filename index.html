@@ -288,12 +288,12 @@
             d="M8 7H5a2 2 0 00-2 2v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path>
         </svg>
       </button> -->
-      <button onclick="restartGame()" id="btn-restart"
+      <button onclick="confirmStopRun()" id="btn-stop"
         class="time-btn w-10 h-10 rounded-lg border border-gray-600 text-gray-400 hover:text-white hover:border-red-500 hover:text-red-400 flex items-center justify-center mr-2"
-        title="Restart Game">
+        title="Stop Run">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15">
+            d="M6 6h12v12H6z">
           </path>
         </svg>
       </button>
@@ -372,7 +372,7 @@
         <button id="tool-select"
           class="service-btn active bg-gray-800 text-gray-200 p-2 rounded-lg w-16 h-16 flex flex-col items-center justify-center border border-transparent"
           onclick="setTool('select')">
-          <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" viewBox="0 24 24">
+          <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122">
             </path>
@@ -383,7 +383,7 @@
         <button id="tool-connect"
           class="service-btn bg-gray-800 text-gray-200 p-2 rounded-lg w-16 h-16 flex flex-col items-center justify-center border border-transparent"
           onclick="setTool('connect')">
-          <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" viewBox="0 24 24">
+          <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1">
             </path>

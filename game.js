@@ -61,6 +61,29 @@ function setupPlayerRestrictions() {
 
 setupPlayerRestrictions();
 
+const I18N_FALLBACKS = {
+    queue_label: "Queue:",
+    load_label: "Load:",
+    rate_limit_label: "Rate Limit:",
+    tip_apigw: "Add an API Gateway to control traffic before it hits your services",
+    tip_nosql: "Add NoSQL for heavy READ/WRITE traffic to reduce database pressure",
+};
+
+function translateText(key) {
+    const translator = globalThis.i18n && typeof globalThis.i18n.t === "function"
+        ? globalThis.i18n.t.bind(globalThis.i18n)
+        : null;
+
+    if (translator) {
+        const translated = translator(key);
+        if (typeof translated === "string" && translated.trim()) {
+            return translated;
+        }
+    }
+
+    return I18N_FALLBACKS[key] || key;
+}
+
 function getAuthToken() {
     return sessionStorage.getItem("authToken");
 }
@@ -118,9 +141,33 @@ function updateStartButtonAvailability() {
     startBtn.textContent = hasLives ? "Start Survival" : "No Lives Remaining";
 }
 
+async function verifySurvivalLives() {
+    if (STATE.pendingLifeSync) {
+        await STATE.pendingLifeSync;
+    }
+
+    await syncPlayerState();
+
+    return Number.isFinite(STATE.lives) && STATE.lives > 0;
+}
+
+function clearActiveRunState() {
+    if (STATE.runEventFlushTimer) {
+        clearInterval(STATE.runEventFlushTimer);
+        STATE.runEventFlushTimer = null;
+    }
+
+    STATE.runSessionId = null;
+    STATE.runEvents = [];
+    STATE.runEventQueue = [];
+    STATE.runEventFlushInFlight = false;
+    STATE.runEventFlushPromise = null;
+}
+
 function renderLeaderboardRows(rows) {
     const tableBody = document.getElementById("leaderboard-table-body");
     if (!tableBody) return;
+    const currentUsername = String(getCurrentUser()?.username || "");
 
     if (!rows.length) {
         tableBody.innerHTML = `
@@ -132,16 +179,30 @@ function renderLeaderboardRows(rows) {
     }
 
     tableBody.innerHTML = rows
-        .map(
-            (row) => `
-            <tr class="border-b border-gray-800">
-                <td class="py-2 text-left">${row.rank}</td>
-                <td class="py-2 text-left">${row.username}</td>
-                <td class="py-2 text-right">${row.bestScore}</td>
-                <td class="py-2 text-right">${row.bestSurvivalSeconds}</td>
+        .map((row, index) => {
+            const isCurrentPlayer = currentUsername && row.username === currentUsername;
+            const hasRankGap = index > 0 && Number(row.rank) - Number(rows[index - 1].rank) > 1;
+            const separatorRow = hasRankGap
+                ? `
+            <tr>
+                <td colspan="4" class="py-1 text-center text-gray-500">...</td>
             </tr>
         `
-        )
+                : "";
+            const rowClasses = isCurrentPlayer
+                ? "border-b border-blue-500/60 bg-blue-500/10 text-blue-200"
+                : "border-b border-gray-800";
+            const fontWeight = isCurrentPlayer ? "font-bold" : "";
+
+            return `${separatorRow}
+            <tr class="${rowClasses}">
+                <td class="py-2 text-left">${row.rank}</td>
+                <td class="py-2 text-left ${fontWeight}">${row.username}</td>
+                <td class="py-2 text-right ${fontWeight}">${row.bestScore}</td>
+                <td class="py-2 text-right ${fontWeight}">${row.bestSurvivalSeconds}</td>
+            </tr>
+        `;
+        })
         .join("");
 }
 
@@ -260,10 +321,6 @@ function captureRunSnapshot(reason) {
 }
 
 async function startRunSession() {
-    if (STATE.isTutorialMode) {
-        return;
-    }
-
     try {
         const payload = await apiRequest("/runs/session", {
             method: "POST",
@@ -278,11 +335,13 @@ async function startRunSession() {
         STATE.runEventFlushTimer = setInterval(() => {
             void flushRunEvents(false);
         }, 3000);
+        return true;
     } catch (error) {
         console.warn("Failed to start run session:", error.message);
         STATE.runSessionId = null;
         STATE.runEvents = [];
         STATE.runEventQueue = [];
+        return false;
     }
 }
 
@@ -314,11 +373,11 @@ async function flushRunEvents(forceAll) {
         return;
     }
 
-    if (STATE.runEventFlushInFlight) {
-        if (STATE.runEventFlushPromise) {
-            await STATE.runEventFlushPromise;
+    while (STATE.runEventFlushInFlight) {
+        if (!STATE.runEventFlushPromise) {
+            break;
         }
-        return;
+        await STATE.runEventFlushPromise;
     }
 
     if (!STATE.runEventQueue.length) {
@@ -360,7 +419,12 @@ async function flushRunEvents(forceAll) {
     }
 }
 
-async function persistRunAndLifeLoss(runSnapshot) {
+async function submitRunSnapshot(runSnapshot) {
+    if (!STATE.runSessionId) {
+        addInterventionWarning("No active run to save.", "error", 4000);
+        return { savedRun: false };
+    }
+
     try {
         await flushRunEvents(true);
         await apiRequest("/runs/submit", {
@@ -368,18 +432,20 @@ async function persistRunAndLifeLoss(runSnapshot) {
             body: JSON.stringify({
                 ...runSnapshot,
                 sessionId: STATE.runSessionId,
-                events: STATE.runEvents || [],
+                events: [],
                 claimedScore: Math.floor(STATE.score.total),
             }),
         });
+        clearActiveRunState();
+        return { savedRun: true };
     } catch (error) {
         console.warn("Failed to submit run:", error.message);
+        addInterventionWarning("Run data could not be saved.", "error", 4000);
+        return { savedRun: false };
     }
-    if (STATE.runEventFlushTimer) {
-        clearInterval(STATE.runEventFlushTimer);
-        STATE.runEventFlushTimer = null;
-    }
+}
 
+async function loseLifeForCurrentPlayer() {
     try {
         const payload = await apiRequest("/players/me/lose-life", {
             method: "POST",
@@ -391,9 +457,24 @@ async function persistRunAndLifeLoss(runSnapshot) {
             updateLivesUI();
             updateStartButtonAvailability();
         }
+        return true;
     } catch (error) {
         console.warn("Failed to persist life loss:", error.message);
+        addInterventionWarning("Run saved, but life sync failed.", "error", 4000);
+        await syncPlayerState();
+        return false;
     }
+}
+
+async function persistRunAndLifeLoss(runSnapshot) {
+    const submitResult = await submitRunSnapshot(runSnapshot);
+    if (!submitResult.savedRun) {
+        await syncPlayerState();
+        return { savedRun: false, lifeUpdated: false };
+    }
+
+    const lifeUpdated = await loseLifeForCurrentPlayer();
+    return { savedRun: true, lifeUpdated };
 }
 
 // ==================== SURVIVAL STATE UI ====================
@@ -1525,43 +1606,84 @@ function clearActiveGameEvents() {
     if (warnings) warnings.innerHTML = '';
 }
 
-window.showGameOver = (isFinalLoss, failureReason) => {
-    // 1. Pause everything
-    window.setTimeScale(0);
-    
-    // 2. Hide conflicting modals
-    document.querySelectorAll(".modal, #main-menu-modal, #sandboxPanel, #tutorial-modal, #game-over-modal").forEach(m => m.classList.add("hidden"));
+function hideActionModal() {
+    document.getElementById("modal")?.classList.add("hidden");
+}
 
-    // 3. Target the main modal
+function showActionModal({
+    title,
+    titleClassName,
+    descriptionHtml,
+    actions,
+    actionsClassName = "flex justify-center gap-4 w-full",
+}) {
+    document
+        .querySelectorAll("#modal, .modal, #main-menu-modal, #sandboxPanel, #tutorial-modal, #game-over-modal")
+        .forEach((m) => m.classList.add("hidden"));
+
     const modal = document.getElementById("modal");
     if (!modal) {
         console.error("Critical: #modal not found in DOM");
-        return;
+        return null;
     }
 
     const titleEl = document.getElementById("modal-title");
     const descEl = document.getElementById("modal-desc");
     const actionsEl = document.getElementById("modal-actions");
+    if (!titleEl || !descEl || !actionsEl) {
+        console.error("Critical: modal content nodes not found in DOM");
+        return null;
+    }
 
-    // 4. Generate Data
+    titleEl.textContent = title;
+    titleEl.className = titleClassName;
+    descEl.innerHTML = descriptionHtml;
+    actionsEl.innerHTML = "";
+    actionsEl.className = actionsClassName;
+
+    actions.forEach((action) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        if (action.id) {
+            button.id = action.id;
+        }
+        button.className = action.className;
+        button.textContent = action.label;
+        button.disabled = Boolean(action.disabled);
+        if (action.disabled) {
+            button.classList.add("opacity-40", "cursor-not-allowed");
+        }
+        button.onclick = action.onClick;
+        actionsEl.appendChild(button);
+    });
+
+    modal.classList.remove("hidden");
+    return { modal, titleEl, descEl, actionsEl };
+}
+
+function setModalButtonsDisabled(disabled) {
+    document.querySelectorAll("#modal-actions button").forEach((button) => {
+        button.disabled = disabled;
+        button.classList.toggle("opacity-40", disabled);
+        button.classList.toggle("cursor-not-allowed", disabled);
+    });
+}
+
+window.showGameOver = (isFinalLoss, failureReason) => {
+    window.setTimeScale(0);
+
     const analysis = analyzeFailure(); 
     const finalReason = failureReason || analysis.reason || "System Instability";
     const finalDesc = analysis.description;
+    const titleClassName = isFinalLoss
+        ? "text-4xl font-extrabold text-red-600 mb-4 tracking-widest uppercase animate-pulse"
+        : "text-4xl font-bold text-white mb-4 tracking-tighter uppercase";
+    const title = isFinalLoss ? "SYSTEM COLLAPSE" : "SYSTEM FAILURE";
 
-    // 5. Build Content UI
-    if (isFinalLoss) {
-        titleEl.textContent = "SYSTEM COLLAPSE";
-        titleEl.className = "text-4xl font-extrabold text-red-600 mb-4 tracking-widest uppercase animate-pulse";
-    } else {
-        titleEl.textContent = "SYSTEM FAILURE";
-        titleEl.className = "text-4xl font-bold text-white mb-4 tracking-tighter uppercase";
-    }
-
-    const statusHeader = !isFinalLoss 
+    const statusHeader = !isFinalLoss
         ? `<div class="mb-4 text-lg font-bold text-red-400 animate-pulse">⚠️ INTEGRITY LOST (${STATE.lives} Lives Remaining)</div>` 
         : ``;
-
-    descEl.innerHTML = `
+    const descriptionHtml = `
         ${statusHeader}
         
         <div class="text-center mb-6">
@@ -1598,60 +1720,224 @@ window.showGameOver = (isFinalLoss, failureReason) => {
         </div>
     `;
 
-    // 6. Configure Buttons
-    actionsEl.innerHTML = ''; 
-
+    let actions = [];
+    let actionsClassName = "flex justify-center gap-4 w-full";
     if (isFinalLoss) {
-        // --- CASE: 0 LIVES LEFT ---
-        const leaderboardBtn = document.createElement("button");
-        leaderboardBtn.className = "bg-purple-600 hover:bg-purple-500 text-white font-bold py-3 px-8 rounded-lg shadow-lg w-full font-mono uppercase text-sm transform transition hover:scale-105";
-        leaderboardBtn.textContent = "View Leaderboard";
-        leaderboardBtn.onclick = () => {
-            window.showLeaderboard();
-        };
-
-        const menuBtn = document.createElement("button");
-        menuBtn.className = "bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-8 rounded-lg shadow-lg w-full font-mono uppercase text-sm transform transition hover:scale-105";
-        menuBtn.textContent = "Return to Main Menu";
-        menuBtn.onclick = () => {
-            modal.classList.add("hidden");
-            openMainMenu();
-        };
-        actionsEl.className = "flex flex-col justify-center gap-3 w-full";
-        actionsEl.appendChild(leaderboardBtn);
-        actionsEl.appendChild(menuBtn);
-
+        actionsClassName = "flex flex-col justify-center gap-3 w-full";
+        actions = [
+            {
+                label: "View Leaderboard",
+                className: "bg-purple-600 hover:bg-purple-500 text-white font-bold py-3 px-8 rounded-lg shadow-lg w-full font-mono uppercase text-sm transform transition hover:scale-105",
+                onClick: () => {
+                    window.showLeaderboard();
+                },
+            },
+            {
+                label: "Return to Main Menu",
+                className: "bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 px-8 rounded-lg shadow-lg w-full font-mono uppercase text-sm transform transition hover:scale-105",
+                onClick: () => {
+                    hideActionModal();
+                    openMainMenu();
+                },
+            },
+        ];
     } else {
-        // --- CASE: LIFE LOST ---
-        
-        // Button 1: Start Again (Green)
-        const retryBtn = document.createElement("button");
-        retryBtn.className = "bg-green-600 hover:bg-green-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105";
-        retryBtn.textContent = "Start Again";
-        retryBtn.onclick = () => {
-            modal.classList.add("hidden");
-            restartGame(); 
-        };
-
-        // Button 2: Leaderboard
-        const leaderboardBtn = document.createElement("button");
-        leaderboardBtn.className = "bg-purple-600 hover:bg-purple-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105 border border-purple-400/30";
-        leaderboardBtn.textContent = "View Leaderboard";
-        leaderboardBtn.onclick = () => {
-            window.showLeaderboard();
-        };
-
-        actionsEl.className = "flex justify-center gap-4 w-full";
-        actionsEl.appendChild(retryBtn);
-        actionsEl.appendChild(leaderboardBtn);
+        actions = [
+            {
+                id: "game-over-retry-btn",
+                label: "Verifying Lives...",
+                disabled: true,
+                className: "bg-green-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transition",
+                onClick: () => {
+                    void restartGame();
+                },
+            },
+            {
+                label: "View Leaderboard",
+                className: "bg-purple-600 hover:bg-purple-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105 border border-purple-400/30",
+                onClick: () => {
+                    window.showLeaderboard();
+                },
+            },
+        ];
     }
-    
-    modal.classList.remove("hidden");
+
+    const modalView = showActionModal({
+        title,
+        titleClassName,
+        descriptionHtml,
+        actions,
+        actionsClassName,
+    });
+    if (!modalView) {
+        return;
+    }
+
+    if (!isFinalLoss) {
+        const retryBtn = modalView.actionsEl.querySelector("#game-over-retry-btn");
+        verifySurvivalLives()
+            .then((hasLives) => {
+                if (!retryBtn) {
+                    return;
+                }
+
+                if (!document.body.contains(retryBtn)) {
+                    return;
+                }
+
+                if (!hasLives) {
+                    window.showGameOver(true, failureReason || finalReason);
+                    return;
+                }
+
+                retryBtn.disabled = false;
+                retryBtn.textContent = "Start Again";
+                retryBtn.className = "bg-green-600 hover:bg-green-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105";
+            })
+            .catch((error) => {
+                console.warn("Failed to verify lives before restart:", error.message);
+            });
+    }
+
     if(STATE.sound && STATE.sound.playGameOver) STATE.sound.playGameOver(isFinalLoss);
 };
 
-function restartGame() {
-    document.getElementById("modal").classList.add("hidden");
+window.confirmStopRun = () => {
+    if (!STATE.gameStarted) {
+        return;
+    }
+
+    if (STATE.timeScale !== 0) {
+        handleGameState(0);
+    }
+
+    if (!STATE.isRunning) {
+        addInterventionWarning("No active run to stop.", "error", 4000);
+        return;
+    }
+
+    if (STATE.isTutorialMode) {
+        showActionModal({
+            title: "EXIT TUTORIAL",
+            titleClassName: "text-4xl font-bold text-white mb-4 tracking-tighter uppercase",
+            descriptionHtml: `
+                <div class="text-center mb-6">
+                    <div class="text-2xl font-bold text-yellow-400 mb-1">Leave Tutorial?</div>
+                    <div class="text-sm text-gray-400">Your tutorial progress will not be saved.</div>
+                </div>
+                <div class="bg-blue-900/40 border border-blue-500/50 rounded-lg p-3 text-left">
+                    <div class="text-gray-300 text-sm leading-relaxed">
+                        You will return to the main menu. No run will be saved and no life will be lost.
+                    </div>
+                </div>
+            `,
+            actions: [
+                {
+                    label: "Exit Tutorial",
+                    className: "bg-red-600 hover:bg-red-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105",
+                    onClick: () => {
+                        void handleConfirmedStop();
+                    },
+                },
+                {
+                    label: "Cancel",
+                    className: "bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105",
+                    onClick: () => {
+                        hideActionModal();
+                    },
+                },
+            ],
+        });
+        return;
+    }
+
+    if (STATE.gameMode !== "survival" || !STATE.runSessionId) {
+        addInterventionWarning("No active run to stop.", "error", 4000);
+        return;
+    }
+
+    showActionModal({
+        title: "STOP CURRENT RUN",
+        titleClassName: "text-4xl font-bold text-white mb-4 tracking-tighter uppercase",
+        descriptionHtml: `
+            <div class="text-center mb-6">
+                <div class="text-2xl font-bold text-yellow-400 mb-1">End This Session?</div>
+                <div class="text-sm text-gray-400">This will be treated as a finished run.</div>
+            </div>
+            <div class="space-y-3 text-left w-full">
+                <div class="bg-blue-900/40 border border-blue-500/50 rounded-lg p-3">
+                    <div class="text-gray-300 text-sm leading-relaxed">
+                        Confirming Stop will save this run, consume one life, and return you to the main menu.
+                    </div>
+                </div>
+            </div>
+        `,
+        actions: [
+            {
+                label: "Stop Run",
+                className: "bg-red-600 hover:bg-red-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105",
+                onClick: () => {
+                    void handleConfirmedStop();
+                },
+            },
+            {
+                label: "Cancel",
+                className: "bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg shadow-lg flex-1 font-mono uppercase text-sm transform transition hover:scale-105",
+                onClick: () => {
+                    hideActionModal();
+                },
+            },
+        ],
+    });
+};
+
+async function handleConfirmedStop() {
+    setModalButtonsDisabled(true);
+
+    if (STATE.isTutorialMode) {
+        clearActiveRunState();
+        clearActiveGameEvents();
+        STATE.isRunning = false;
+        hideActionModal();
+        openMainMenu();
+        return;
+    }
+
+    if (!STATE.runSessionId) {
+        addInterventionWarning("No active run to stop.", "error", 4000);
+        setModalButtonsDisabled(false);
+        return;
+    }
+
+    const result = await persistRunAndLifeLoss(captureRunSnapshot("Stopped by Player"));
+    if (!result.savedRun) {
+        setModalButtonsDisabled(false);
+        return;
+    }
+
+    clearActiveGameEvents();
+    STATE.isRunning = false;
+    hideActionModal();
+    openMainMenu();
+}
+
+async function restartGame() {
+    if (STATE.gameMode === "survival" && !STATE.isTutorialMode) {
+        const hasLives = await verifySurvivalLives();
+        if (!hasLives) {
+            alert("No lives remaining. Ask an admin to add more lives.");
+            window.showGameOver(true, "No Lives Remaining");
+            return;
+        }
+
+        const sessionStarted = await startRunSession();
+        if (!sessionStarted) {
+            addInterventionWarning("Could not start a new run.", "error", 4000);
+            return;
+        }
+    }
+
+    hideActionModal();
     resetGame(STATE.gameMode);
 }
 
@@ -2038,8 +2324,13 @@ window.startGame = async () => {
         return;
     }
 
+    const sessionStarted = await startRunSession();
+    if (!sessionStarted) {
+        alert("Could not start a run. Please try again.");
+        return;
+    }
+
     document.getElementById("main-menu-modal").classList.add("hidden");
-    await startRunSession();
     resetGame("survival", false);
 };
 
@@ -2333,6 +2624,7 @@ let hoveredUpgradeService = null;
 let hideUpgradeTimer = null;
 const upgradeIndicator = document.getElementById("upgrade-indicator");
 const upgradeCostEl = document.getElementById("upgrade-cost");
+const upgradeableServiceTypes = ["compute", "db", "cache", "apigw", "nosql"];
 
 if (upgradeIndicator) {
     upgradeIndicator.addEventListener("click", (e) => {
@@ -2464,7 +2756,6 @@ container.addEventListener("mousedown", (e) => {
         if (
             (STATE.activeTool === "lambda" && i.type === "service") ||
             (STATE.activeTool === "db" && i.type === "service") ||
-            (STATE.activeTool === "cache" && i.type === "service")
             (STATE.activeTool === "cache" && i.type === "service") ||
             (STATE.activeTool === "apigw" && i.type === "service") ||
             (STATE.activeTool === "nosql" && i.type === "service")
@@ -2474,7 +2765,6 @@ container.addEventListener("mousedown", (e) => {
                 svc &&
                 ((STATE.activeTool === "lambda" && svc.type === "compute") ||
                     (STATE.activeTool === "db" && svc.type === "db") ||
-                    (STATE.activeTool === "cache" && svc.type === "cache"))
                     (STATE.activeTool === "cache" && svc.type === "cache") ||
                     (STATE.activeTool === "apigw" && svc.type === "apigw") ||
                     (STATE.activeTool === "nosql" && svc.type === "nosql"))
@@ -2638,9 +2928,9 @@ container.addEventListener("mousemove", (e) => {
                 const rateLimit = s.config.rateLimit || 20;
                 const rateUsed = s.rateCounter || 0;
                 const rateColor = rateUsed > rateLimit ? "text-red-400" : rateUsed > rateLimit * 0.7 ? "text-yellow-400" : "text-green-400";
-                content += `${i18n.t('queue_label')} <span class="${loadColor}">${s.queue.length}</span><br>
-                ${i18n.t('load_label')} <span class="${loadColor}">${s.processing.length}/${s.config.capacity}</span><br>
-                ${i18n.t('rate_limit_label')} <span class="${rateColor}">${rateUsed}/${rateLimit} RPS</span>`;
+                content += `${translateText("queue_label")} <span class="${loadColor}">${s.queue.length}</span><br>
+                ${translateText("load_label")} <span class="${loadColor}">${s.processing.length}/${s.config.capacity}</span><br>
+                ${translateText("rate_limit_label")} <span class="${rateColor}">${rateUsed}/${rateLimit} RPS</span>`;
             } else if (s.type === "cache") {
                 const hitRate = Math.round((s.config.cacheHitRate || 0.35) * 100);
                 content += `Queue: <span class="${loadColor}">${s.queue.length}</span><br>
@@ -2666,15 +2956,8 @@ container.addEventListener("mousemove", (e) => {
             }
             content += `</div>`;
 
-            // Show upgrade option for upgradeable services
-            if (
-                (STATE.activeTool === "lambda" && s.type === "compute") ||
-                (STATE.activeTool === "db" && s.type === "db") ||
-                (STATE.activeTool === "cache" && s.type === "cache")
-                (STATE.activeTool === "cache" && s.type === "cache") ||
-                (STATE.activeTool === "apigw" && s.type === "apigw") ||
-                (STATE.activeTool === "nosql" && s.type === "nosql")
-            ) {
+            // Always show upgrade info for upgradeable services while hovering.
+            if (upgradeableServiceTypes.includes(s.type)) {
                 const tiers = CONFIG.services[s.type].tiers;
                 if (s.tier < tiers.length) {
                     cursor = "pointer";
@@ -2687,7 +2970,7 @@ container.addEventListener("mousemove", (e) => {
                 }
             }
 
-            if (["compute", "db", "cache", "apigw", "nosql"].includes(s.type)) {
+            if (upgradeableServiceTypes.includes(s.type)) {
                 const tiers = CONFIG.services[s.type].tiers;
                 if (s.tier < tiers.length) {
                     if (hideUpgradeTimer) {
@@ -3230,12 +3513,12 @@ function analyzeFailure() {
         result.tips.push("Add Cache to improve hit rates and reduce DB load");
     }
     if (!STATE.services.some((s) => s.type === "apigw")) {
-        result.tips.push(i18n.t('tip_apigw'));
+        result.tips.push(translateText("tip_apigw"));
     }
 
     if (!STATE.services.some((s) => s.type === "nosql") &&
         (STATE.failures.READ > 5 || STATE.failures.WRITE > 5)) {
-        result.tips.push(i18n.t('tip_nosql'));
+        result.tips.push(translateText("tip_nosql"));
     }
 
     result.tips = result.tips.slice(0, 4);
