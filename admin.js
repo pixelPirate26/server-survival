@@ -21,6 +21,9 @@ class AdminDashboard {
         this.activeTab = "players";
         this.refreshData();
         this.refreshRuns();
+        this.runsRefreshTimer = setInterval(() => {
+            void this.refreshRuns();
+        }, 10000);
         this.showTab(this.activeTab);
     }
 
