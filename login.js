@@ -81,6 +81,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
             sessionStorage.setItem("authToken", result.token);
             sessionStorage.setItem("currentUser", JSON.stringify(result.user));
+            if (window.runSyncService && typeof window.runSyncService.notifyLogin === "function") {
+                try {
+                    await window.runSyncService.notifyLogin();
+                } catch (error) {
+                    console.warn("Queued run sync could not start after login:", error.message);
+                }
+            }
 
             loginBtn.innerHTML = "Access Granted";
             loginBtn.classList.remove("bg-blue-600", "hover:bg-blue-500");

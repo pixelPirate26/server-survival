@@ -14,11 +14,24 @@ class AdminDashboard {
         this.runDetailRaw = document.getElementById("run-detail-raw");
         this.runDetailToggle = document.getElementById("run-detail-toggle");
         this.toastEl = document.getElementById("admin-toast");
+        this.announcementMessageInput = document.getElementById("announcement-message");
+        this.announcementCharCount = document.getElementById("announcement-char-count");
+        this.announcementRecipientSummary = document.getElementById("announcement-recipient-summary");
+        this.announcementSelectionCount = document.getElementById("announcement-selection-count");
+        this.sendSelectedBtn = document.getElementById("send-selected-btn");
+        this.sendAllBtn = document.getElementById("send-all-btn");
+        this.bulkLivesInput = document.getElementById("bulk-lives-input");
+        this.bulkBudgetInput = document.getElementById("bulk-budget-input");
+        this.bulkSettingsSummary = document.getElementById("bulk-settings-summary");
+        this.bulkSettingsSelectionCount = document.getElementById("bulk-settings-selection-count");
+        this.bulkSettingsApplyBtn = document.getElementById("bulk-settings-apply-btn");
         this.selectedUsers = new Set();
         this.players = [];
         this.runs = [];
         this.runDetailRawVisible = false;
         this.activeTab = "players";
+        this.bindAnnouncementComposer();
+        this.bindBulkSettingsForm();
         this.refreshData();
         this.refreshRuns();
         this.runsRefreshTimer = setInterval(() => {
@@ -70,6 +83,139 @@ class AdminDashboard {
         }, 2500);
     }
 
+    bindAnnouncementComposer() {
+        if (!this.announcementMessageInput) {
+            return;
+        }
+
+        this.announcementMessageInput.addEventListener("input", () => {
+            this.updateAnnouncementComposerState();
+        });
+
+        this.updateAnnouncementComposerState();
+    }
+
+    updateAnnouncementComposerState() {
+        const text = String(this.announcementMessageInput?.value || "");
+        const selectedCount = this.selectedUsers.size;
+        const maxLength = Number(this.announcementMessageInput?.maxLength || 280);
+
+        if (this.announcementCharCount) {
+            this.announcementCharCount.textContent = `${text.length} / ${maxLength}`;
+            this.announcementCharCount.className = `text-xs font-mono ${
+                text.length > maxLength * 0.9 ? "text-yellow-400" : "text-gray-500"
+            }`;
+        }
+
+        if (this.announcementSelectionCount) {
+            this.announcementSelectionCount.textContent = `${selectedCount} selected`;
+        }
+
+        if (this.announcementRecipientSummary) {
+            if (selectedCount === 0) {
+                this.announcementRecipientSummary.textContent =
+                    "Send to all players, or select one or more players below.";
+            } else if (selectedCount === 1) {
+                const [username] = Array.from(this.selectedUsers);
+                this.announcementRecipientSummary.textContent = `Selected audience: ${username}.`;
+            } else {
+                this.announcementRecipientSummary.textContent = `Selected audience: ${selectedCount} players.`;
+            }
+        }
+
+        if (this.sendSelectedBtn) {
+            this.sendSelectedBtn.disabled = selectedCount === 0;
+            this.sendSelectedBtn.classList.toggle("opacity-40", selectedCount === 0);
+            this.sendSelectedBtn.classList.toggle("cursor-not-allowed", selectedCount === 0);
+        }
+    }
+
+    setAnnouncementComposerBusy(isBusy) {
+        [this.sendSelectedBtn, this.sendAllBtn, this.announcementMessageInput].forEach((element) => {
+            if (!element) {
+                return;
+            }
+            element.disabled = isBusy || (element === this.sendSelectedBtn && this.selectedUsers.size === 0);
+        });
+    }
+
+    getAnnouncementMessage() {
+        return String(this.announcementMessageInput?.value || "").trim();
+    }
+
+    clearAnnouncementComposer() {
+        if (this.announcementMessageInput) {
+            this.announcementMessageInput.value = "";
+        }
+        this.updateAnnouncementComposerState();
+    }
+
+    bindBulkSettingsForm() {
+        [this.bulkLivesInput, this.bulkBudgetInput].forEach((input) => {
+            if (!input) {
+                return;
+            }
+
+            input.addEventListener("input", () => {
+                this.updateBulkSettingsState();
+            });
+        });
+
+        this.updateBulkSettingsState();
+    }
+
+    updateBulkSettingsState() {
+        const selectedCount = this.selectedUsers.size;
+        const hasLivesValue = String(this.bulkLivesInput?.value || "").trim() !== "";
+        const hasBudgetValue = String(this.bulkBudgetInput?.value || "").trim() !== "";
+        const hasAnyValue = hasLivesValue || hasBudgetValue;
+
+        if (this.bulkSettingsSelectionCount) {
+            this.bulkSettingsSelectionCount.textContent = `${selectedCount} selected`;
+        }
+
+        if (this.bulkSettingsSummary) {
+            if (selectedCount === 0) {
+                this.bulkSettingsSummary.textContent =
+                    "Select one or more players, then set lives and/or starting budget.";
+            } else if (!hasAnyValue) {
+                this.bulkSettingsSummary.textContent =
+                    "Leave a field blank to skip it, or enter both values to overwrite both.";
+            } else if (selectedCount === 1) {
+                const [username] = Array.from(this.selectedUsers);
+                this.bulkSettingsSummary.textContent = `Ready to update ${username}.`;
+            } else {
+                this.bulkSettingsSummary.textContent = `Ready to update ${selectedCount} selected players.`;
+            }
+        }
+
+        if (this.bulkSettingsApplyBtn) {
+            const disabled = selectedCount === 0 || !hasAnyValue;
+            this.bulkSettingsApplyBtn.disabled = disabled;
+            this.bulkSettingsApplyBtn.classList.toggle("opacity-40", disabled);
+            this.bulkSettingsApplyBtn.classList.toggle("cursor-not-allowed", disabled);
+        }
+    }
+
+    setBulkSettingsBusy(isBusy) {
+        [this.bulkLivesInput, this.bulkBudgetInput, this.bulkSettingsApplyBtn].forEach((element) => {
+            if (!element) {
+                return;
+            }
+            element.disabled = isBusy;
+        });
+    }
+
+    clearBulkSettingsInputs() {
+        if (this.bulkLivesInput) {
+            this.bulkLivesInput.value = "";
+        }
+        if (this.bulkBudgetInput) {
+            this.bulkBudgetInput.value = "";
+        }
+        this.updateBulkSettingsState();
+    }
+
     async refreshData() {
         try {
             const [playersPayload, leaderboardPayload] = await Promise.all([
@@ -79,6 +225,8 @@ class AdminDashboard {
 
             this.renderPlayers(playersPayload.players || []);
             this.renderLeaderboard(leaderboardPayload.leaderboard || []);
+            this.updateAnnouncementComposerState();
+            this.updateBulkSettingsState();
         } catch (error) {
             if (error.status === 401 || error.status === 403) {
                 this.logout();
@@ -109,7 +257,16 @@ class AdminDashboard {
 
     renderPlayers(players) {
         this.players = players;
+        const playerNames = new Set(players.map((player) => player.username));
+        Array.from(this.selectedUsers).forEach((username) => {
+            if (!playerNames.has(username)) {
+                this.selectedUsers.delete(username);
+            }
+        });
+
         if (!players.length) {
+            this.updateAnnouncementComposerState();
+            this.updateBulkSettingsState();
             this.playerTableBody.innerHTML = `
                 <tr>
                     <td colspan="9" class="p-4 text-center text-gray-500 italic">No players found.</td>
@@ -118,19 +275,15 @@ class AdminDashboard {
             return;
         }
 
-        const playerNames = new Set(players.map((player) => player.username));
-        Array.from(this.selectedUsers).forEach((username) => {
-            if (!playerNames.has(username)) {
-                this.selectedUsers.delete(username);
-            }
-        });
-
         const allSelected = players.every((player) => this.selectedUsers.has(player.username));
         const selectAll = document.getElementById("select-all");
         if (selectAll) {
             selectAll.checked = allSelected;
             selectAll.indeterminate = !allSelected && this.selectedUsers.size > 0;
         }
+
+        this.updateAnnouncementComposerState();
+        this.updateBulkSettingsState();
 
         this.playerTableBody.innerHTML = players
             .map((player) => {
@@ -280,6 +433,7 @@ class AdminDashboard {
             const setup = run.setup || {};
             const services = Array.isArray(setup.services) ? setup.services : [];
             const timeline = Array.isArray(run.timeline) ? run.timeline : [];
+            const runSummary = run.summary || {};
 
             const serviceCounts = {};
             const tierCounts = {};
@@ -303,19 +457,22 @@ class AdminDashboard {
                 mode: run.mode,
                 reason: run.reason,
                 eventsCount: run.eventsCount,
+                requestsProcessed: Number(runSummary.requestsProcessed || 0),
+                timelineBucketSeconds: Number(run.timelineBucketSeconds || 1),
                 upkeepEnabled: setup.upkeepEnabled !== false,
                 autoRepairEnabled: setup.autoRepairEnabled === true,
                 servicesTotal: services.length,
                 serviceCounts,
                 tierCounts,
                 failures: run.failures || {},
+                scoreBreakdown: run.scoreBreakdown || runSummary.scoreBreakdown || {},
                 timelineBuckets: timeline.length,
             };
 
             this.renderRunSummary(summary);
             this.renderRunSetup(summary, setup);
             this.renderRunFailures(summary.failures);
-            this.renderTimeline(timeline);
+            this.renderTimeline(timeline, summary.timelineBucketSeconds);
             this.renderRawRun({ summary, timeline, run, recomputed: payload.recomputed });
             this.runDetailModal.classList.remove("hidden");
         } catch (error) {
@@ -380,7 +537,9 @@ class AdminDashboard {
             ["Mode", summary.mode],
             ["Reason", summary.reason],
             ["Events", summary.eventsCount],
+            ["Requests", summary.requestsProcessed || 0],
             ["Buckets", summary.timelineBuckets],
+            ["Bucket (s)", summary.timelineBucketSeconds || 1],
             ["Upkeep", summary.upkeepEnabled ? "On" : "Off"],
             ["Auto-Repair", summary.autoRepairEnabled ? "On" : "Off"],
         ];
@@ -429,7 +588,7 @@ class AdminDashboard {
             .join(" | ");
     }
 
-    renderTimeline(timeline) {
+    renderTimeline(timeline, timelineBucketSeconds = 1) {
         if (!this.runDetailTimelineBody) return;
         if (!Array.isArray(timeline) || !timeline.length) {
             this.runDetailTimelineBody.innerHTML = `
@@ -447,7 +606,7 @@ class AdminDashboard {
         const step = Math.max(1, Math.ceil(timeline.length / maxRows));
         const sampled = timeline.filter((_, idx) => idx % step === 0);
         if (this.runDetailTimelineMeta) {
-            this.runDetailTimelineMeta.textContent = `Showing ${sampled.length} of ${timeline.length} buckets (step ${step})`;
+            this.runDetailTimelineMeta.textContent = `Showing ${sampled.length} of ${timeline.length} buckets (step ${step}, ${Number(timelineBucketSeconds || 1)}s each)`;
         }
 
         this.runDetailTimelineBody.innerHTML = sampled
@@ -551,6 +710,105 @@ class AdminDashboard {
         }
 
         this.renderPlayers(this.players);
+    }
+
+    async sendAnnouncement(scope) {
+        const message = this.getAnnouncementMessage();
+        if (!message) {
+            this.showToast("Enter an announcement message", "error");
+            return;
+        }
+
+        const isSelectedScope = scope === "selected";
+        const usernames = isSelectedScope ? Array.from(this.selectedUsers) : [];
+        if (isSelectedScope && !usernames.length) {
+            this.showToast("Select at least one player first", "error");
+            return;
+        }
+
+        this.setAnnouncementComposerBusy(true);
+
+        try {
+            const body = { message };
+            if (isSelectedScope) {
+                body.usernames = usernames;
+            }
+
+            const payload = await this.apiRequest("/admin/messages", {
+                method: "POST",
+                body: JSON.stringify(body),
+            });
+
+            const recipientCount = Number(payload?.recipients?.count || 0);
+            this.clearAnnouncementComposer();
+            this.showToast(
+                isSelectedScope
+                    ? `Announcement sent to ${recipientCount} selected player${recipientCount === 1 ? "" : "s"}`
+                    : `Announcement broadcast to ${recipientCount} player${recipientCount === 1 ? "" : "s"}`
+            );
+        } catch (error) {
+            this.showToast(error.message || "Failed to send announcement", "error");
+        } finally {
+            this.setAnnouncementComposerBusy(false);
+            this.updateAnnouncementComposerState();
+        }
+    }
+
+    async bulkUpdateSelectedPlayers() {
+        if (!this.selectedUsers.size) {
+            this.showToast("Select at least one player", "error");
+            return;
+        }
+
+        const livesValue = String(this.bulkLivesInput?.value || "").trim();
+        const budgetValue = String(this.bulkBudgetInput?.value || "").trim();
+        if (!livesValue && !budgetValue) {
+            this.showToast("Enter lives and/or starting budget", "error");
+            return;
+        }
+
+        const body = {
+            usernames: Array.from(this.selectedUsers),
+        };
+
+        if (livesValue) {
+            const lives = Number(livesValue);
+            if (!Number.isFinite(lives) || lives < 0) {
+                this.showToast("Lives must be a non-negative number", "error");
+                return;
+            }
+            body.lives = lives;
+        }
+
+        if (budgetValue) {
+            const startingBudget = Number(budgetValue);
+            if (!Number.isFinite(startingBudget) || startingBudget < 0) {
+                this.showToast("Starting budget must be a non-negative number", "error");
+                return;
+            }
+            body.startingBudget = startingBudget;
+        }
+
+        this.setBulkSettingsBusy(true);
+
+        try {
+            const payload = await this.apiRequest("/admin/players/bulk-settings", {
+                method: "PATCH",
+                body: JSON.stringify(body),
+            });
+
+            const updatedCount = Array.isArray(payload?.updated) ? payload.updated.length : this.selectedUsers.size;
+            this.clearBulkSettingsInputs();
+            this.showToast(
+                `Updated ${updatedCount} selected player${updatedCount === 1 ? "" : "s"}`
+            );
+            await this.refreshData();
+        } catch (error) {
+            this.showToast(error.message || "Failed to update selected players", "error");
+        } finally {
+            this.setBulkSettingsBusy(false);
+            this.updateBulkSettingsState();
+        }
     }
 
     async lockSelected(locked) {

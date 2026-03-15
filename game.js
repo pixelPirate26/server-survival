@@ -128,6 +128,488 @@ async function apiRequest(path, options = {}) {
     return payload;
 }
 
+const API_CACHE_TTL_MS = {
+    playerState: 5000,
+    leaderboard: 10000,
+};
+const apiResponseCache = new Map();
+const RUN_TIMELINE_BUCKET_SECONDS = 10;
+const ANNOUNCEMENT_FETCH_LIMIT = 30;
+const ANNOUNCEMENT_POLL_INTERVAL_MS = 30000;
+const RUN_SUMMARY_OUTCOMES = [
+    "COMPLETED",
+    "FAILED",
+    "THROTTLED",
+    "MALICIOUS_BLOCKED",
+    "MALICIOUS_PASSED",
+];
+
+function getApiCacheKey(path, method = "GET") {
+    return `${String(method || "GET").toUpperCase()}:${path}`;
+}
+
+function invalidateApiCache(pathFragment = "") {
+    Array.from(apiResponseCache.keys()).forEach((key) => {
+        if (!pathFragment || key.includes(pathFragment)) {
+            apiResponseCache.delete(key);
+        }
+    });
+}
+
+async function apiRequestCached(path, options = {}, ttlMs = 0, force = false) {
+    const method = String(options.method || "GET").toUpperCase();
+    if (force || ttlMs <= 0 || method !== "GET") {
+        return apiRequest(path, options);
+    }
+
+    const cacheKey = getApiCacheKey(path, method);
+    const now = Date.now();
+    const cachedEntry = apiResponseCache.get(cacheKey);
+    if (cachedEntry) {
+        if (cachedEntry.value && cachedEntry.expiresAt > now) {
+            return cachedEntry.value;
+        }
+        if (cachedEntry.promise) {
+            return cachedEntry.promise;
+        }
+    }
+
+    const requestPromise = apiRequest(path, options)
+        .then((payload) => {
+            apiResponseCache.set(cacheKey, {
+                value: payload,
+                expiresAt: Date.now() + ttlMs,
+            });
+            return payload;
+        })
+        .catch((error) => {
+            apiResponseCache.delete(cacheKey);
+            throw error;
+        });
+
+    apiResponseCache.set(cacheKey, {
+        promise: requestPromise,
+        expiresAt: now + ttlMs,
+    });
+
+    return requestPromise;
+}
+
+function createEmptyRunOutcomeCounts() {
+    return Object.values(TRAFFIC_TYPES).reduce((counts, type) => {
+        counts[type] = RUN_SUMMARY_OUTCOMES.reduce((outcomes, outcome) => {
+            outcomes[outcome] = 0;
+            return outcomes;
+        }, {});
+        return counts;
+    }, {});
+}
+
+function createEmptyScoreBreakdown() {
+    return {
+        total: 0,
+        storage: 0,
+        database: 0,
+        maliciousBlocked: 0,
+    };
+}
+
+function createEmptyFailureBreakdown() {
+    return {
+        STATIC: 0,
+        READ: 0,
+        WRITE: 0,
+        UPLOAD: 0,
+        SEARCH: 0,
+        MALICIOUS: 0,
+    };
+}
+
+function createRunSummaryState() {
+    return {
+        requestsProcessed: 0,
+        durationSeconds: 0,
+        scoreBreakdown: createEmptyScoreBreakdown(),
+        counts: createEmptyRunOutcomeCounts(),
+    };
+}
+
+function cloneScoreBreakdown(score = {}) {
+    return {
+        total: Number(score.total || 0),
+        storage: Number(score.storage || 0),
+        database: Number(score.database || 0),
+        maliciousBlocked: Number(score.maliciousBlocked || 0),
+    };
+}
+
+function cloneFailureBreakdown(failures = {}) {
+    return {
+        STATIC: Number(failures.STATIC || 0),
+        READ: Number(failures.READ || 0),
+        WRITE: Number(failures.WRITE || 0),
+        UPLOAD: Number(failures.UPLOAD || 0),
+        SEARCH: Number(failures.SEARCH || 0),
+        MALICIOUS: Number(failures.MALICIOUS || 0),
+    };
+}
+
+function ensureRunTrackingState() {
+    if (!STATE.runSummary) {
+        STATE.runSummary = createRunSummaryState();
+    }
+    if (!(STATE.runTimelineBuckets instanceof Map)) {
+        STATE.runTimelineBuckets = new Map();
+    }
+    if (!Number.isFinite(STATE.runTimelineStartedAt) || STATE.runTimelineStartedAt <= 0) {
+        STATE.runTimelineStartedAt = Date.now();
+    }
+}
+
+function calculateCurrentRunDurationSeconds() {
+    if (Number.isFinite(STATE.elapsedGameTime) && STATE.elapsedGameTime >= 0) {
+        return Math.max(0, Math.floor(STATE.elapsedGameTime));
+    }
+
+    if (Number.isFinite(STATE.gameStartTime) && STATE.gameStartTime > 0) {
+        return Math.max(0, Math.floor((performance.now() - STATE.gameStartTime) / 1000));
+    }
+
+    return 0;
+}
+
+function recordRunOutcome(req, outcome) {
+    if (STATE.isTutorialMode || !STATE.runSessionId) {
+        return;
+    }
+
+    const trafficType = String(req?.type || "UNKNOWN").toUpperCase();
+    if (!TRAFFIC_TYPES[trafficType]) {
+        return;
+    }
+
+    ensureRunTrackingState();
+    const normalizedOutcome = RUN_SUMMARY_OUTCOMES.includes(outcome) ? outcome : "FAILED";
+    STATE.runSummary.counts[trafficType][normalizedOutcome] += 1;
+    STATE.runSummary.requestsProcessed = Math.max(0, Math.floor(STATE.requestsProcessed || 0));
+    STATE.runSummary.durationSeconds = calculateCurrentRunDurationSeconds();
+    STATE.runSummary.scoreBreakdown = cloneScoreBreakdown(STATE.score);
+
+    const elapsedMs = Math.max(0, Date.now() - STATE.runTimelineStartedAt);
+    const bucketIndex = Math.max(0, Math.floor(elapsedMs / (RUN_TIMELINE_BUCKET_SECONDS * 1000)));
+    STATE.runTimelineBuckets.set(bucketIndex, {
+        t: bucketIndex * RUN_TIMELINE_BUCKET_SECONDS,
+        score: cloneScoreBreakdown(STATE.score),
+        failures: cloneFailureBreakdown(STATE.failures),
+    });
+}
+
+function buildRunTimeline() {
+    if (!(STATE.runTimelineBuckets instanceof Map) || !STATE.runTimelineBuckets.size) {
+        return [];
+    }
+
+    const sortedBuckets = Array.from(STATE.runTimelineBuckets.entries()).sort(
+        (a, b) => a[0] - b[0]
+    );
+    const maxBucket = sortedBuckets[sortedBuckets.length - 1][0];
+    const timeline = [];
+    let lastSnapshot = {
+        t: 0,
+        score: createEmptyScoreBreakdown(),
+        failures: createEmptyFailureBreakdown(),
+    };
+
+    for (let bucket = 0; bucket <= maxBucket; bucket += 1) {
+        if (STATE.runTimelineBuckets.has(bucket)) {
+            const snapshot = STATE.runTimelineBuckets.get(bucket);
+            lastSnapshot = {
+                t: bucket * RUN_TIMELINE_BUCKET_SECONDS,
+                score: cloneScoreBreakdown(snapshot.score),
+                failures: cloneFailureBreakdown(snapshot.failures),
+            };
+        }
+
+        timeline.push({
+            t: bucket * RUN_TIMELINE_BUCKET_SECONDS,
+            score: cloneScoreBreakdown(lastSnapshot.score),
+            failures: cloneFailureBreakdown(lastSnapshot.failures),
+        });
+    }
+
+    return timeline;
+}
+
+function generateSubmissionId() {
+    if (window.crypto?.randomUUID) {
+        return window.crypto.randomUUID();
+    }
+    return `submission-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function buildRunSubmissionPayload(runSnapshot, submissionId) {
+    ensureRunTrackingState();
+
+    return {
+        ...runSnapshot,
+        sessionId: STATE.runSessionId,
+        submissionId,
+        claimedScore: Math.floor(STATE.score.total),
+        survivalSeconds: calculateCurrentRunDurationSeconds(),
+        timelineBucketSeconds: RUN_TIMELINE_BUCKET_SECONDS,
+        timeline: buildRunTimeline(),
+        summary: {
+            requestsProcessed: Math.max(0, Math.floor(STATE.requestsProcessed || 0)),
+            durationSeconds: calculateCurrentRunDurationSeconds(),
+            scoreBreakdown: cloneScoreBreakdown(STATE.score),
+            counts: JSON.parse(JSON.stringify(STATE.runSummary.counts)),
+        },
+    };
+}
+
+async function applyCurrentUserState(user) {
+    if (!user) {
+        return;
+    }
+
+    const username = String(user.username || "");
+    const pendingLifeDelta =
+        window.runSyncService && typeof window.runSyncService.getPendingLifeDelta === "function"
+            ? await window.runSyncService.getPendingLifeDelta(username)
+            : 0;
+    const effectiveLives = Math.max(0, Number(user.lives || 0) - pendingLifeDelta);
+    const hydratedUser = {
+        ...user,
+        lives: effectiveLives,
+    };
+
+    sessionStorage.setItem("currentUser", JSON.stringify(hydratedUser));
+    STATE.lives = hydratedUser.lives;
+    STATE.playerStartingBudget = Number(user.startingBudget || 0);
+
+    const usernameEl = document.getElementById("student-username-display");
+    if (usernameEl) {
+        usernameEl.textContent = String(user.username || "PLAYER").toUpperCase();
+    }
+
+    updateLivesUI();
+    updateStartButtonAvailability();
+}
+
+function applyOptimisticLifeLoss() {
+    const currentLives = Number.isFinite(STATE.lives) ? STATE.lives : Number(getCurrentUser()?.lives || 0);
+    const nextLives = Math.max(0, currentLives - 1);
+    const currentUser = getCurrentUser();
+
+    STATE.lives = nextLives;
+    if (currentUser && currentUser.username) {
+        sessionStorage.setItem(
+            "currentUser",
+            JSON.stringify({
+                ...currentUser,
+                lives: nextLives,
+            })
+        );
+    }
+
+    invalidateApiCache("/players/me");
+    updateLivesUI();
+    updateStartButtonAvailability();
+}
+
+function formatAnnouncementTimestamp(value) {
+    if (!value) {
+        return "";
+    }
+
+    const timestamp = new Date(value);
+    if (Number.isNaN(timestamp.getTime())) {
+        return "";
+    }
+
+    return timestamp.toLocaleString();
+}
+
+function renderAnnouncements() {
+    const loadingEl = document.getElementById("announcements-loading");
+    const emptyEl = document.getElementById("announcements-empty");
+    const listEl = document.getElementById("announcements-list");
+    const badgeEl = document.getElementById("announcement-unread-badge");
+    if (!loadingEl || !emptyEl || !listEl || !badgeEl) {
+        return;
+    }
+
+    const announcements = STATE.announcements || {};
+    const messages = Array.isArray(announcements.messages) ? announcements.messages : [];
+
+    loadingEl.classList.toggle("hidden", announcements.initialized === true);
+    emptyEl.classList.toggle("hidden", !announcements.initialized || messages.length > 0);
+
+    listEl.innerHTML = messages
+        .slice()
+        .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+        .slice(0, 12)
+        .map((message) => `
+            <article class="rounded-lg border border-cyan-500/20 bg-gray-900/70 p-3">
+                <div class="flex items-start justify-between gap-3">
+                    <div class="text-xs font-bold text-cyan-200 font-mono uppercase">
+                        ${message.audience === "selected" ? "Targeted Announcement" : "Broadcast Announcement"}
+                    </div>
+                    <div class="text-[10px] text-gray-500 font-mono whitespace-nowrap">${formatAnnouncementTimestamp(message.createdAt)}</div>
+                </div>
+                <p class="mt-2 text-sm leading-relaxed text-gray-200">${message.message}</p>
+                <div class="mt-2 text-[10px] text-gray-500 font-mono">From ${String(message.createdBy || "admin").toUpperCase()}</div>
+            </article>
+        `)
+        .join("");
+
+    badgeEl.textContent = String(announcements.unreadCount || 0);
+    badgeEl.classList.toggle("hidden", !announcements.unreadCount);
+}
+
+function markAnnouncementsRead() {
+    if (!STATE.announcements) {
+        return;
+    }
+
+    STATE.announcements.unreadCount = 0;
+    renderAnnouncements();
+}
+
+window.toggleAnnouncementsPanel = () => {
+    const content = document.getElementById("announcements-panel-content");
+    const icon = document.getElementById("announcements-panel-icon");
+    if (!content) {
+        return;
+    }
+
+    content.classList.toggle("hidden");
+    if (icon) {
+        icon.innerText = content.classList.contains("hidden") ? "▼" : "▲";
+    }
+
+    if (!content.classList.contains("hidden")) {
+        markAnnouncementsRead();
+    }
+};
+
+function mergeAnnouncements(existingMessages, incomingMessages) {
+    const byId = new Map();
+    [...existingMessages, ...incomingMessages].forEach((message) => {
+        if (!message?.id) {
+            return;
+        }
+        byId.set(message.id, message);
+    });
+    return Array.from(byId.values());
+}
+
+async function fetchPlayerAnnouncements({ initial = false } = {}) {
+    const announcements = STATE.announcements;
+    if (!announcements || announcements.fetchInFlight || isAdminUser() || !getAuthToken()) {
+        return;
+    }
+
+    announcements.fetchInFlight = true;
+    const previousIds = new Set((announcements.messages || []).map((message) => message.id));
+    const afterId = initial ? null : announcements.nextCursor;
+    let pageCursor = afterId;
+    let allMessages = [];
+    let nextCursor = announcements.nextCursor;
+    let hasMore = true;
+    let pageCount = 0;
+
+    try {
+        while (hasMore) {
+            const searchParams = new URLSearchParams();
+            searchParams.set("limit", String(ANNOUNCEMENT_FETCH_LIMIT));
+            if (pageCursor) {
+                searchParams.set("afterId", pageCursor);
+            }
+
+            const payload = await apiRequest(`/players/me/messages?${searchParams.toString()}`, {
+                method: "GET",
+            });
+            const messages = Array.isArray(payload.messages) ? payload.messages : [];
+            allMessages = allMessages.concat(messages);
+            nextCursor = payload.nextCursor || nextCursor || null;
+            pageCount += 1;
+
+            if (!initial || messages.length < ANNOUNCEMENT_FETCH_LIMIT || pageCount >= 10 || !payload.nextCursor) {
+                hasMore = false;
+            } else {
+                pageCursor = payload.nextCursor;
+            }
+        }
+
+        announcements.messages = mergeAnnouncements(announcements.messages || [], allMessages);
+        announcements.nextCursor = nextCursor;
+
+        const newMessages = allMessages.filter((message) => !previousIds.has(message.id));
+        if (announcements.initialized && newMessages.length) {
+            const panelContent = document.getElementById("announcements-panel-content");
+            if (panelContent && !panelContent.classList.contains("hidden")) {
+                announcements.unreadCount = 0;
+            } else {
+                announcements.unreadCount += newMessages.length;
+            }
+
+            const latestMessage = newMessages[newMessages.length - 1];
+            const preview = String(latestMessage?.message || "").slice(0, 80);
+            addInterventionWarning(
+                newMessages.length === 1
+                    ? `Admin announcement: ${preview}${preview.length === 80 ? "..." : ""}`
+                    : `${newMessages.length} new admin announcements received.`,
+                "info",
+                5000
+            );
+        }
+
+        announcements.initialized = true;
+        renderAnnouncements();
+    } catch (error) {
+        if (initial) {
+            const loadingEl = document.getElementById("announcements-loading");
+            if (loadingEl) {
+                loadingEl.textContent = "Announcements unavailable.";
+            }
+        }
+        if (error.status === 401) {
+            clearSessionAndRedirect();
+            return;
+        }
+        console.warn("Could not fetch announcements:", error.message);
+    } finally {
+        announcements.fetchInFlight = false;
+    }
+}
+
+window.refreshAnnouncements = () => {
+    void fetchPlayerAnnouncements();
+};
+
+function startAnnouncementPolling() {
+    if (!STATE.announcements || STATE.announcements.pollTimer || isAdminUser()) {
+        renderAnnouncements();
+        return;
+    }
+
+    renderAnnouncements();
+    void fetchPlayerAnnouncements({ initial: true });
+
+    STATE.announcements.pollTimer = setInterval(() => {
+        if (document.visibilityState === "visible") {
+            void fetchPlayerAnnouncements();
+        }
+    }, ANNOUNCEMENT_POLL_INTERVAL_MS);
+
+    document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") {
+            void fetchPlayerAnnouncements();
+        }
+    });
+}
+
 function updateStartButtonAvailability() {
     const startBtn = document.getElementById("start-survival-btn");
     if (!startBtn) return;
@@ -152,17 +634,45 @@ async function verifySurvivalLives() {
 }
 
 function clearActiveRunState() {
-    if (STATE.runEventFlushTimer) {
-        clearInterval(STATE.runEventFlushTimer);
-        STATE.runEventFlushTimer = null;
-    }
-
     STATE.runSessionId = null;
-    STATE.runEvents = [];
-    STATE.runEventQueue = [];
-    STATE.runEventFlushInFlight = false;
-    STATE.runEventFlushPromise = null;
+    STATE.runSummary = createRunSummaryState();
+    STATE.runTimelineBuckets = new Map();
+    STATE.runTimelineStartedAt = 0;
 }
+
+window.addEventListener("serverSurvival:runSyncSuccess", (event) => {
+    const detail = event.detail || {};
+    invalidateApiCache("/leaderboard");
+    invalidateApiCache("/players/me");
+    if (detail.payload?.user) {
+        void applyCurrentUserState(detail.payload.user);
+    }
+});
+
+window.addEventListener("serverSurvival:runSyncFailed", (event) => {
+    const detail = event.detail || {};
+    if (detail.username && detail.username === getCurrentUser()?.username) {
+        addInterventionWarning("A queued run could not be synced.", "error", 5000);
+        invalidateApiCache("/leaderboard");
+        invalidateApiCache("/players/me");
+        void syncPlayerState({ force: true });
+    }
+});
+
+window.addEventListener("serverSurvival:runSyncPaused", (event) => {
+    const detail = event.detail || {};
+    if (detail.username && detail.username === getCurrentUser()?.username) {
+        addInterventionWarning("Saved run is waiting for re-login to sync.", "warning", 5000);
+    }
+});
+
+if (window.runSyncService && typeof window.runSyncService.notifyLogin === "function") {
+    void window.runSyncService.notifyLogin().catch((error) => {
+        console.warn("Queued run sync could not resume on boot:", error.message);
+    });
+}
+
+startAnnouncementPolling();
 
 function renderLeaderboardRows(rows) {
     const tableBody = document.getElementById("leaderboard-table-body");
@@ -234,7 +744,11 @@ window.showLeaderboard = async () => {
     `;
 
     try {
-        const payload = await apiRequest("/leaderboard?limit=20", { method: "GET" });
+        const payload = await apiRequestCached(
+            "/leaderboard?limit=20",
+            { method: "GET" },
+            API_CACHE_TTL_MS.leaderboard
+        );
         renderLeaderboardRows(payload.leaderboard || []);
     } catch (error) {
         tableBody.innerHTML = `
@@ -260,22 +774,19 @@ window.closeLeaderboard = () => {
     window.leaderboardReturnTarget = null;
 };
 
-async function syncPlayerState() {
+async function syncPlayerState({ force = false } = {}) {
     try {
-        const payload = await apiRequest("/players/me", { method: "GET" });
+        const payload = await apiRequestCached(
+            "/players/me",
+            { method: "GET" },
+            API_CACHE_TTL_MS.playerState,
+            force
+        );
         const user = payload.user;
 
         if (!user) return;
 
-        sessionStorage.setItem("currentUser", JSON.stringify(user));
-        STATE.lives = user.lives;
-        STATE.playerStartingBudget = user.startingBudget;
-        const usernameEl = document.getElementById("student-username-display");
-        if (usernameEl) {
-            usernameEl.textContent = String(user.username || "PLAYER").toUpperCase();
-        }
-        updateLivesUI();
-        updateStartButtonAvailability();
+        await applyCurrentUserState(user);
     } catch (error) {
         if (error.status === 401) {
             clearSessionAndRedirect();
@@ -327,95 +838,17 @@ async function startRunSession() {
             body: JSON.stringify({ mode: STATE.gameMode }),
         });
         STATE.runSessionId = payload.sessionId;
-        STATE.runEvents = [];
-        STATE.runEventQueue = [];
-        if (STATE.runEventFlushTimer) {
-            clearInterval(STATE.runEventFlushTimer);
-        }
-        STATE.runEventFlushTimer = setInterval(() => {
-            void flushRunEvents(false);
-        }, 3000);
+        STATE.runSummary = createRunSummaryState();
+        STATE.runTimelineBuckets = new Map();
+        STATE.runTimelineStartedAt = Date.now();
         return true;
     } catch (error) {
         console.warn("Failed to start run session:", error.message);
         STATE.runSessionId = null;
-        STATE.runEvents = [];
-        STATE.runEventQueue = [];
+        STATE.runSummary = createRunSummaryState();
+        STATE.runTimelineBuckets = new Map();
+        STATE.runTimelineStartedAt = 0;
         return false;
-    }
-}
-
-function logRunEvent(req, outcome) {
-    if (STATE.isTutorialMode || !STATE.runSessionId) {
-        return;
-    }
-    const timestamp = Date.now();
-    if (!STATE.runEvents) {
-        STATE.runEvents = [];
-    }
-    if (!STATE.runEventQueue) {
-        STATE.runEventQueue = [];
-    }
-    STATE.runEvents.push({
-        type: req?.type || "UNKNOWN",
-        outcome,
-        ts: timestamp,
-    });
-    STATE.runEventQueue.push({
-        type: req?.type || "UNKNOWN",
-        outcome,
-        ts: timestamp,
-    });
-}
-
-async function flushRunEvents(forceAll) {
-    if (!STATE.runSessionId || !STATE.runEventQueue) {
-        return;
-    }
-
-    while (STATE.runEventFlushInFlight) {
-        if (!STATE.runEventFlushPromise) {
-            break;
-        }
-        await STATE.runEventFlushPromise;
-    }
-
-    if (!STATE.runEventQueue.length) {
-        return;
-    }
-
-    STATE.runEventFlushInFlight = true;
-    STATE.runEventFlushPromise = (async () => {
-        try {
-            while (STATE.runEventQueue.length) {
-                const batchSize = forceAll ? 1000 : 200;
-                const batch = STATE.runEventQueue.splice(0, batchSize);
-                if (!batch.length) {
-                    break;
-                }
-
-                await apiRequest("/runs/event", {
-                    method: "POST",
-                    body: JSON.stringify({
-                        sessionId: STATE.runSessionId,
-                        events: batch,
-                    }),
-                });
-
-                if (!forceAll) {
-                    break;
-                }
-            }
-        } catch (error) {
-            console.warn("Failed to flush run events:", error.message);
-        }
-    })();
-
-    try {
-        await STATE.runEventFlushPromise;
-    } finally {
-        STATE.runEventFlushInFlight = false;
-        STATE.runEventFlushPromise = null;
     }
 }
 
@@ -426,55 +859,41 @@ async function submitRunSnapshot(runSnapshot) {
     }
 
     try {
-        await flushRunEvents(true);
-        await apiRequest("/runs/submit", {
-            method: "POST",
-            body: JSON.stringify({
-                ...runSnapshot,
-                sessionId: STATE.runSessionId,
-                events: [],
-                claimedScore: Math.floor(STATE.score.total),
-            }),
+        if (!window.runSyncService || typeof window.runSyncService.enqueueRunSubmission !== "function") {
+            throw new Error("Run sync service is unavailable");
+        }
+
+        const submissionId = generateSubmissionId();
+        const payload = buildRunSubmissionPayload(runSnapshot, submissionId);
+        const enqueueResult = await window.runSyncService.enqueueRunSubmission({
+            submissionId,
+            sessionId: STATE.runSessionId,
+            payload,
+            localLifeDelta: STATE.gameMode === "survival" ? 1 : 0,
         });
+
         clearActiveRunState();
+        invalidateApiCache("/leaderboard");
+        invalidateApiCache("/players/me");
+        if (!enqueueResult.synced) {
+            addInterventionWarning("Run saved locally, syncing automatically.", "warning", 5000);
+        }
         return { savedRun: true };
     } catch (error) {
         console.warn("Failed to submit run:", error.message);
-        addInterventionWarning("Run data could not be saved.", "error", 4000);
+        addInterventionWarning("Run data could not be saved locally.", "error", 4000);
         return { savedRun: false };
-    }
-}
-
-async function loseLifeForCurrentPlayer() {
-    try {
-        const payload = await apiRequest("/players/me/lose-life", {
-            method: "POST",
-        });
-        if (payload.user) {
-            STATE.lives = payload.user.lives;
-            STATE.playerStartingBudget = payload.user.startingBudget;
-            sessionStorage.setItem("currentUser", JSON.stringify(payload.user));
-            updateLivesUI();
-            updateStartButtonAvailability();
-        }
-        return true;
-    } catch (error) {
-        console.warn("Failed to persist life loss:", error.message);
-        addInterventionWarning("Run saved, but life sync failed.", "error", 4000);
-        await syncPlayerState();
-        return false;
     }
 }
 
 async function persistRunAndLifeLoss(runSnapshot) {
     const submitResult = await submitRunSnapshot(runSnapshot);
     if (!submitResult.savedRun) {
-        await syncPlayerState();
+        await syncPlayerState({ force: true });
         return { savedRun: false, lifeUpdated: false };
     }
 
-    const lifeUpdated = await loseLifeForCurrentPlayer();
-    return { savedRun: true, lifeUpdated };
+    return { savedRun: true, lifeUpdated: true };
 }
 
 // ==================== SURVIVAL STATE UI ====================
@@ -1370,12 +1789,10 @@ function resetGame(mode = "survival", isTutorial = false) {
     STATE.gameMode = mode;
     if (isTutorial) {
         STATE.runSessionId = null;
-        STATE.runEvents = [];
-        STATE.runEventQueue = [];
-    } else {
-        STATE.runEvents = [];
-        STATE.runEventQueue = [];
     }
+    STATE.runSummary = createRunSummaryState();
+    STATE.runTimelineBuckets = new Map();
+    STATE.runTimelineStartedAt = STATE.runSessionId ? Date.now() : 0;
 
     // Initialize lives for survival mode
     if (typeof STATE.lives === 'undefined' || mode !== 'survival') {
@@ -1909,6 +2326,7 @@ async function handleConfirmedStop() {
         return;
     }
 
+    applyOptimisticLifeLoss();
     const result = await persistRunAndLifeLoss(captureRunSnapshot("Stopped by Player"));
     if (!result.savedRun) {
         setModalButtonsDisabled(false);
@@ -2137,8 +2555,6 @@ function updateScore(req, outcome) {
     const points = CONFIG.survival.SCORE_POINTS;
     const typeConfig = req.typeConfig || CONFIG.trafficTypes[req.type];
 
-    logRunEvent(req, outcome);
-
     if (outcome === "MALICIOUS_BLOCKED") {
         STATE.score.maliciousBlocked += points.MALICIOUS_BLOCKED_SCORE;
         STATE.score.total += points.MALICIOUS_BLOCKED_SCORE;
@@ -2213,6 +2629,7 @@ function updateScore(req, outcome) {
         }
     }
 
+    recordRunOutcome(req, outcome);
     updateScoreUI();
 }
 
@@ -2273,6 +2690,10 @@ function showMainMenu() {
     }
 
     updateStartButtonAvailability();
+    void fetchPlayerAnnouncements();
+    if (window.runSyncService && typeof window.runSyncService.scheduleFlush === "function") {
+        window.runSyncService.scheduleFlush(0, "menu");
+    }
     void syncPlayerState();
 }
 
@@ -3412,11 +3833,7 @@ function animate(time) {
         // 3. Handle Lives
         const runSnapshot = captureRunSnapshot(reason);
         if (typeof STATE.lives === 'undefined') STATE.lives = 3;
-        STATE.lives = Math.max(0, STATE.lives - 1);
-        
-        // Update Stats UI if available
-        if(typeof updateLivesUI === 'function') updateLivesUI();
-        updateStartButtonAvailability();
+        applyOptimisticLifeLoss();
 
         STATE.pendingLifeSync = persistRunAndLifeLoss(runSnapshot).finally(() => {
             STATE.pendingLifeSync = null;
@@ -3602,6 +4019,10 @@ function openMainMenu() {
     document.getElementById("leaderboard-modal")?.classList.add("hidden");
     STATE.sound.playMenuBGM();
     updateStartButtonAvailability();
+    void fetchPlayerAnnouncements();
+    if (window.runSyncService && typeof window.runSyncService.scheduleFlush === "function") {
+        window.runSyncService.scheduleFlush(0, "menu");
+    }
     void syncPlayerState();
 }
 
