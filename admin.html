@@ -42,6 +42,10 @@
                 class="px-4 py-2 rounded border border-purple-500/30 font-mono text-sm transition bg-gray-900/40 text-gray-300 hover:bg-purple-900/40 hover:text-purple-100">
                 Leaderboard
             </button>
+            <button data-tab="grading" onclick="adminDashboard.showTab('grading')"
+                class="px-4 py-2 rounded border border-cyan-500/30 font-mono text-sm transition bg-gray-900/40 text-gray-300 hover:bg-cyan-900/40 hover:text-cyan-100">
+                Grading
+            </button>
             <button data-tab="runs" onclick="adminDashboard.showTab('runs')"
                 class="px-4 py-2 rounded border border-emerald-500/30 font-mono text-sm transition bg-gray-900/40 text-gray-300 hover:bg-emerald-900/40 hover:text-emerald-100">
                 Recent Runs
@@ -180,6 +184,138 @@
                         <tbody id="leaderboard-table-body" class="text-sm font-mono text-gray-300">
                             <tr>
                                 <td colspan="4" class="p-4 text-center text-gray-500 italic">Loading leaderboard...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div id="grading-panel" class="glass-panel p-6 rounded-2xl border border-gray-700 hidden">
+                <div class="flex flex-wrap items-start justify-between gap-4 mb-5">
+                    <div>
+                        <h2 class="text-xl font-bold text-cyan-300">Assignment Grading</h2>
+                        <p class="text-xs text-gray-400 font-mono mt-1">Threshold-based grading preview + raw/scaled CSV export.</p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2 font-mono text-xs">
+                        <button id="grading-calculate-btn" onclick="adminDashboard.calculateGrades()" class="bg-cyan-900/60 hover:bg-cyan-700 text-cyan-100 px-4 py-2 rounded border border-cyan-500/30 transition">
+                            Calculate Grades
+                        </button>
+                        <button id="grading-export-raw-btn" onclick="adminDashboard.exportGradesCsv('raw')" class="bg-slate-800 text-slate-300 px-4 py-2 rounded border border-slate-600 transition opacity-40 cursor-not-allowed" disabled>
+                            Export Raw CSV
+                        </button>
+                        <button id="grading-export-scaled-btn" onclick="adminDashboard.exportGradesCsv('scaled')" class="bg-slate-800 text-slate-300 px-4 py-2 rounded border border-slate-600 transition opacity-40 cursor-not-allowed" disabled>
+                            Export Scaled CSV
+                        </button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 mb-5">
+                    <div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/20 p-4">
+                        <h3 class="text-sm font-bold text-cyan-200 uppercase tracking-wider mb-3">Score Threshold</h3>
+                        <label for="grading-score-threshold-input" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Minimum Score</label>
+                        <input id="grading-score-threshold-input" type="number" min="0" inputmode="numeric" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 mb-3" />
+                        <label for="grading-score-points-input" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Points</label>
+                        <input id="grading-score-points-input" type="number" min="0" inputmode="numeric" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500" />
+                    </div>
+                    <div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/20 p-4">
+                        <h3 class="text-sm font-bold text-cyan-200 uppercase tracking-wider mb-3">Time Threshold</h3>
+                        <label for="grading-time-threshold-input" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Minimum Time (s)</label>
+                        <input id="grading-time-threshold-input" type="number" min="0" inputmode="numeric" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 mb-3" />
+                        <label for="grading-time-points-input" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Points</label>
+                        <input id="grading-time-points-input" type="number" min="0" inputmode="numeric" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500" />
+                    </div>
+                    <div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/20 p-4">
+                        <h3 class="text-sm font-bold text-cyan-200 uppercase tracking-wider mb-3">Valid Runs</h3>
+                        <label for="grading-valid-runs-threshold-input" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Minimum Survival Runs</label>
+                        <input id="grading-valid-runs-threshold-input" type="number" min="0" inputmode="numeric" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500 mb-3" />
+                        <label for="grading-valid-runs-points-input" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Points</label>
+                        <input id="grading-valid-runs-points-input" type="number" min="0" inputmode="numeric" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500" />
+                    </div>
+                    <div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/20 p-4">
+                        <h3 class="text-sm font-bold text-cyan-200 uppercase tracking-wider mb-3">Integrity</h3>
+                        <label for="grading-integrity-points-input" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Integrity Points</label>
+                        <input id="grading-integrity-points-input" type="number" min="0" inputmode="numeric" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500" />
+                        <p class="text-xs text-gray-500 font-mono mt-3">Awarded only when a player has at least one valid survival run and is not flagged.</p>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-5">
+                    <div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/10 p-4">
+                        <div class="flex items-center justify-between gap-3 mb-3">
+                            <div>
+                                <h3 class="text-sm font-bold text-cyan-200 uppercase tracking-wider">Milestones</h3>
+                                <p class="text-xs text-gray-500 font-mono mt-1">Add score or time gates that award full points independently.</p>
+                            </div>
+                            <button id="grading-add-milestone-btn" onclick="adminDashboard.addMilestoneRow()" class="bg-cyan-900/60 hover:bg-cyan-700 text-cyan-100 px-3 py-2 rounded border border-cyan-500/30 transition font-mono text-xs">
+                                Add Milestone
+                            </button>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left border-collapse">
+                                <thead>
+                                    <tr class="text-xs text-gray-500 uppercase border-b border-gray-700">
+                                        <th class="p-2">Label</th>
+                                        <th class="p-2">Metric</th>
+                                        <th class="p-2 text-right">Min</th>
+                                        <th class="p-2 text-right">Points</th>
+                                        <th class="p-2 text-right">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="grading-milestones-body" class="text-sm font-mono text-gray-300">
+                                    <tr>
+                                        <td colspan="5" class="p-4 text-center text-gray-500 italic">Loading milestones...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="rounded-2xl border border-cyan-500/20 bg-cyan-950/10 p-4">
+                        <div class="flex items-center justify-between gap-3 mb-3">
+                            <div>
+                                <h3 class="text-sm font-bold text-cyan-200 uppercase tracking-wider">Scaling Bands</h3>
+                                <p class="text-xs text-gray-500 font-mono mt-1">The first matching percentile band sets the scaled total in the second export.</p>
+                            </div>
+                            <button id="grading-add-scaling-band-btn" onclick="adminDashboard.addScalingBandRow()" class="bg-cyan-900/60 hover:bg-cyan-700 text-cyan-100 px-3 py-2 rounded border border-cyan-500/30 transition font-mono text-xs">
+                                Add Band
+                            </button>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left border-collapse">
+                                <thead>
+                                    <tr class="text-xs text-gray-500 uppercase border-b border-gray-700">
+                                        <th class="p-2">Label</th>
+                                        <th class="p-2 text-right">Max %</th>
+                                        <th class="p-2 text-right">Scaled Total</th>
+                                        <th class="p-2 text-right">Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="grading-scaling-body" class="text-sm font-mono text-gray-300">
+                                    <tr>
+                                        <td colspan="4" class="p-4 text-center text-gray-500 italic">Loading scaling bands...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="grading-summary" class="mb-5 rounded-2xl border border-cyan-500/20 bg-cyan-950/10 px-4 py-3 text-sm text-gray-300 font-mono">
+                    Adjust the config above, then calculate a grading preview.
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left border-collapse">
+                        <thead>
+                            <tr id="grading-preview-head-row" class="text-xs text-gray-500 uppercase border-b border-gray-700">
+                                <th class="p-3">Player</th>
+                                <th class="p-3 text-right">Raw</th>
+                                <th class="p-3 text-right">Scaled</th>
+                            </tr>
+                        </thead>
+                        <tbody id="grading-preview-body" class="text-sm font-mono text-gray-300">
+                            <tr>
+                                <td colspan="3" class="p-4 text-center text-gray-500 italic">No grading preview yet.</td>
                             </tr>
                         </tbody>
                     </table>

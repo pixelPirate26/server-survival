@@ -1,4 +1,155 @@
 const API_BASE_URL = window.SERVER_API_URL
+const DEFAULT_GRADING_CONFIG = Object.freeze({
+    scoreThreshold: {
+        minScore: 1000,
+        points: 30,
+    },
+    timeThreshold: {
+        minSeconds: 300,
+        points: 25,
+    },
+    validRunsThreshold: {
+        minRuns: 2,
+        points: 10,
+    },
+    integrityPoints: 10,
+    milestones: [
+        {
+            label: "Survive 180s",
+            metric: "survivalSeconds",
+            minValue: 180,
+            points: 5,
+        },
+        {
+            label: "Survive 480s",
+            metric: "survivalSeconds",
+            minValue: 480,
+            points: 5,
+        },
+        {
+            label: "Score 1500",
+            metric: "score",
+            minValue: 1500,
+            points: 15,
+        },
+    ],
+    scalingBands: [
+        {
+            label: "Top 10%",
+            maxPercentile: 10,
+            scaledTotal: 100,
+        },
+        {
+            label: "Top 30%",
+            maxPercentile: 30,
+            scaledTotal: 90,
+        },
+        {
+            label: "Top 60%",
+            maxPercentile: 60,
+            scaledTotal: 80,
+        },
+        {
+            label: "Everyone Else",
+            maxPercentile: 100,
+            scaledTotal: 70,
+        },
+    ],
+});
+
+function cloneValue(value) {
+    return JSON.parse(JSON.stringify(value));
+}
+
+function normalizeText(value) {
+    return String(value || "").trim();
+}
+
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+function slugifyLabel(label) {
+    const slug = normalizeText(label)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "_")
+        .replace(/^_+|_+$/g, "");
+    return slug || "milestone";
+}
+
+function createUniqueSlug(label, seenSlugs) {
+    const base = slugifyLabel(label);
+    let candidate = base;
+    let suffix = 2;
+
+    while (seenSlugs.has(candidate)) {
+        candidate = `${base}_${suffix}`;
+        suffix += 1;
+    }
+
+    seenSlugs.add(candidate);
+    return candidate;
+}
+
+function buildMilestoneDefinitions(milestones = []) {
+    const seenSlugs = new Set();
+    return milestones.map((milestone) => ({
+        ...milestone,
+        id: createUniqueSlug(milestone.label, seenSlugs),
+    }));
+}
+
+function toNonNegativeInteger(value, fallback = 0) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+        return fallback;
+    }
+    return Math.floor(parsed);
+}
+
+function csvEscape(value) {
+    const text = value === null || value === undefined ? "" : String(value);
+    if (!/[",\n\r]/.test(text)) {
+        return text;
+    }
+    return `"${text.replace(/"/g, '""')}"`;
+}
+
+function buildCsvContent(headers, rows) {
+    const headerRow = headers.map((header) => csvEscape(header.label)).join(",");
+    const dataRows = rows.map((row) =>
+        headers.map((header) => csvEscape(row[header.key])).join(",")
+    );
+    return [headerRow, ...dataRows].join("\r\n");
+}
+
+function downloadCsvFile(filename, content) {
+    const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+}
+
+function formatFilenameTimestamp(value) {
+    const date = new Date(value || Date.now());
+    const year = String(date.getFullYear());
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    const hours = String(date.getHours()).padStart(2, "0");
+    const minutes = String(date.getMinutes()).padStart(2, "0");
+    const seconds = String(date.getSeconds()).padStart(2, "0");
+    return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+}
 
 class AdminDashboard {
     constructor() {
@@ -25,13 +176,37 @@ class AdminDashboard {
         this.bulkSettingsSummary = document.getElementById("bulk-settings-summary");
         this.bulkSettingsSelectionCount = document.getElementById("bulk-settings-selection-count");
         this.bulkSettingsApplyBtn = document.getElementById("bulk-settings-apply-btn");
+        this.gradingScoreThresholdInput = document.getElementById("grading-score-threshold-input");
+        this.gradingScorePointsInput = document.getElementById("grading-score-points-input");
+        this.gradingTimeThresholdInput = document.getElementById("grading-time-threshold-input");
+        this.gradingTimePointsInput = document.getElementById("grading-time-points-input");
+        this.gradingValidRunsThresholdInput = document.getElementById("grading-valid-runs-threshold-input");
+        this.gradingValidRunsPointsInput = document.getElementById("grading-valid-runs-points-input");
+        this.gradingIntegrityPointsInput = document.getElementById("grading-integrity-points-input");
+        this.gradingMilestonesBody = document.getElementById("grading-milestones-body");
+        this.gradingScalingBody = document.getElementById("grading-scaling-body");
+        this.gradingCalculateBtn = document.getElementById("grading-calculate-btn");
+        this.gradingExportRawBtn = document.getElementById("grading-export-raw-btn");
+        this.gradingExportScaledBtn = document.getElementById("grading-export-scaled-btn");
+        this.gradingSummary = document.getElementById("grading-summary");
+        this.gradingPreviewHeadRow = document.getElementById("grading-preview-head-row");
+        this.gradingPreviewBody = document.getElementById("grading-preview-body");
         this.selectedUsers = new Set();
         this.players = [];
         this.runs = [];
         this.runDetailRawVisible = false;
+        this.gradingConfig = cloneValue(DEFAULT_GRADING_CONFIG);
+        this.gradingPreview = null;
+        this.gradingPreviewConfig = null;
+        this.gradingPreviewDirty = true;
+        this.gradingBusy = false;
         this.activeTab = "players";
         this.bindAnnouncementComposer();
         this.bindBulkSettingsForm();
+        this.bindGradingForm();
+        this.renderGradingConfig();
+        this.updateGradingSummary();
+        this.updateGradingButtons();
         this.refreshData();
         this.refreshRuns();
         this.runsRefreshTimer = setInterval(() => {
@@ -214,6 +389,588 @@ class AdminDashboard {
             this.bulkBudgetInput.value = "";
         }
         this.updateBulkSettingsState();
+    }
+
+    bindGradingForm() {
+        const bindings = [
+            [this.gradingScoreThresholdInput, "scoreThreshold", "minScore"],
+            [this.gradingScorePointsInput, "scoreThreshold", "points"],
+            [this.gradingTimeThresholdInput, "timeThreshold", "minSeconds"],
+            [this.gradingTimePointsInput, "timeThreshold", "points"],
+            [this.gradingValidRunsThresholdInput, "validRunsThreshold", "minRuns"],
+            [this.gradingValidRunsPointsInput, "validRunsThreshold", "points"],
+        ];
+
+        bindings.forEach(([input, section, field]) => {
+            if (!input) {
+                return;
+            }
+            input.addEventListener("input", () => {
+                this.gradingConfig[section][field] = toNonNegativeInteger(input.value, 0);
+                this.markGradingConfigDirty();
+            });
+        });
+
+        if (this.gradingIntegrityPointsInput) {
+            this.gradingIntegrityPointsInput.addEventListener("input", () => {
+                this.gradingConfig.integrityPoints = toNonNegativeInteger(
+                    this.gradingIntegrityPointsInput.value,
+                    0
+                );
+                this.markGradingConfigDirty();
+            });
+        }
+    }
+
+    setGradingButtonState(button, enabled, enabledClasses = []) {
+        if (!button) {
+            return;
+        }
+
+        button.disabled = !enabled;
+        button.classList.toggle("opacity-40", !enabled);
+        button.classList.toggle("cursor-not-allowed", !enabled);
+
+        const disabledClasses = ["bg-slate-800", "border-slate-600", "text-slate-300"];
+        disabledClasses.forEach((className) => {
+            button.classList.toggle(className, !enabled);
+        });
+        enabledClasses.forEach((className) => {
+            button.classList.toggle(className, enabled);
+        });
+    }
+
+    setGradingBusy(isBusy) {
+        this.gradingBusy = isBusy === true;
+        if (this.gradingCalculateBtn) {
+            this.gradingCalculateBtn.disabled = this.gradingBusy;
+            this.gradingCalculateBtn.classList.toggle("opacity-40", this.gradingBusy);
+            this.gradingCalculateBtn.classList.toggle("cursor-not-allowed", this.gradingBusy);
+        }
+        this.updateGradingButtons();
+    }
+
+    updateGradingButtons() {
+        const canExport =
+            Boolean(this.gradingPreview) && this.gradingPreviewDirty !== true && !this.gradingBusy;
+
+        this.setGradingButtonState(this.gradingExportRawBtn, canExport, [
+            "bg-blue-900/60",
+            "hover:bg-blue-700",
+            "border-blue-500/30",
+            "text-blue-100",
+        ]);
+        this.setGradingButtonState(this.gradingExportScaledBtn, canExport, [
+            "bg-emerald-900/60",
+            "hover:bg-emerald-700",
+            "border-emerald-500/30",
+            "text-emerald-100",
+        ]);
+    }
+
+    updateGradingSummary() {
+        if (!this.gradingSummary) {
+            return;
+        }
+
+        if (!this.gradingPreview) {
+            this.gradingSummary.textContent =
+                "Adjust the config above, then calculate a grading preview.";
+            return;
+        }
+
+        const summary = this.gradingPreview.summary || {};
+        const generatedAt = summary.generatedAt
+            ? new Date(summary.generatedAt).toLocaleString()
+            : "unknown";
+        const staleMessage =
+            this.gradingPreviewDirty === true
+                ? " Configuration changed since this preview. Recalculate before exporting."
+                : "";
+
+        this.gradingSummary.textContent =
+            `${Number(summary.cohortSize || 0)} players | ` +
+            `${Number(summary.eligibleRunCount || 0)} survival runs | ` +
+            `raw max ${Number(summary.rawTotalMax || 0)} | ` +
+            `generated ${generatedAt}.` +
+            staleMessage;
+    }
+
+    markGradingConfigDirty() {
+        this.gradingPreviewDirty = true;
+        this.updateGradingButtons();
+        this.updateGradingSummary();
+    }
+
+    renderGradingConfig() {
+        if (this.gradingScoreThresholdInput) {
+            this.gradingScoreThresholdInput.value = this.gradingConfig.scoreThreshold.minScore;
+        }
+        if (this.gradingScorePointsInput) {
+            this.gradingScorePointsInput.value = this.gradingConfig.scoreThreshold.points;
+        }
+        if (this.gradingTimeThresholdInput) {
+            this.gradingTimeThresholdInput.value = this.gradingConfig.timeThreshold.minSeconds;
+        }
+        if (this.gradingTimePointsInput) {
+            this.gradingTimePointsInput.value = this.gradingConfig.timeThreshold.points;
+        }
+        if (this.gradingValidRunsThresholdInput) {
+            this.gradingValidRunsThresholdInput.value = this.gradingConfig.validRunsThreshold.minRuns;
+        }
+        if (this.gradingValidRunsPointsInput) {
+            this.gradingValidRunsPointsInput.value = this.gradingConfig.validRunsThreshold.points;
+        }
+        if (this.gradingIntegrityPointsInput) {
+            this.gradingIntegrityPointsInput.value = this.gradingConfig.integrityPoints;
+        }
+
+        this.renderMilestoneRows();
+        this.renderScalingBandRows();
+    }
+
+    renderMilestoneRows() {
+        if (!this.gradingMilestonesBody) {
+            return;
+        }
+
+        const milestones = Array.isArray(this.gradingConfig.milestones)
+            ? this.gradingConfig.milestones
+            : [];
+
+        if (!milestones.length) {
+            this.gradingMilestonesBody.innerHTML = `
+                <tr>
+                    <td colspan="5" class="p-4 text-center text-gray-500 italic">No milestones configured.</td>
+                </tr>
+            `;
+            return;
+        }
+
+        this.gradingMilestonesBody.innerHTML = milestones
+            .map(
+                (milestone, index) => `
+                    <tr class="border-b border-gray-800">
+                        <td class="p-2">
+                            <input
+                                type="text"
+                                value="${escapeHtml(milestone.label || "")}"
+                                oninput="adminDashboard.updateMilestoneField(${index}, 'label', this.value)"
+                                class="w-full rounded-lg border border-gray-700 bg-gray-950/70 px-3 py-2 text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                            />
+                        </td>
+                        <td class="p-2">
+                            <select
+                                onchange="adminDashboard.updateMilestoneField(${index}, 'metric', this.value)"
+                                class="w-full rounded-lg border border-gray-700 bg-gray-950/70 px-3 py-2 text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                            >
+                                <option value="survivalSeconds" ${milestone.metric === "survivalSeconds" ? "selected" : ""}>time</option>
+                                <option value="score" ${milestone.metric === "score" ? "selected" : ""}>score</option>
+                            </select>
+                        </td>
+                        <td class="p-2">
+                            <input
+                                type="number"
+                                min="0"
+                                inputmode="numeric"
+                                value="${Number(milestone.minValue || 0)}"
+                                oninput="adminDashboard.updateMilestoneField(${index}, 'minValue', this.value)"
+                                class="w-full rounded-lg border border-gray-700 bg-gray-950/70 px-3 py-2 text-right text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                            />
+                        </td>
+                        <td class="p-2">
+                            <input
+                                type="number"
+                                min="0"
+                                inputmode="numeric"
+                                value="${Number(milestone.points || 0)}"
+                                oninput="adminDashboard.updateMilestoneField(${index}, 'points', this.value)"
+                                class="w-full rounded-lg border border-gray-700 bg-gray-950/70 px-3 py-2 text-right text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                            />
+                        </td>
+                        <td class="p-2 text-right">
+                            <button
+                                onclick="adminDashboard.removeMilestoneRow(${index})"
+                                class="bg-red-900/60 hover:bg-red-700 text-red-100 px-3 py-2 rounded border border-red-500/30 transition text-xs"
+                            >
+                                Remove
+                            </button>
+                        </td>
+                    </tr>
+                `
+            )
+            .join("");
+    }
+
+    renderScalingBandRows() {
+        if (!this.gradingScalingBody) {
+            return;
+        }
+
+        const scalingBands = Array.isArray(this.gradingConfig.scalingBands)
+            ? this.gradingConfig.scalingBands
+            : [];
+
+        if (!scalingBands.length) {
+            this.gradingScalingBody.innerHTML = `
+                <tr>
+                    <td colspan="4" class="p-4 text-center text-gray-500 italic">No scaling bands configured.</td>
+                </tr>
+            `;
+            return;
+        }
+
+        this.gradingScalingBody.innerHTML = scalingBands
+            .map(
+                (band, index) => `
+                    <tr class="border-b border-gray-800">
+                        <td class="p-2">
+                            <input
+                                type="text"
+                                value="${escapeHtml(band.label || "")}"
+                                oninput="adminDashboard.updateScalingBandField(${index}, 'label', this.value)"
+                                class="w-full rounded-lg border border-gray-700 bg-gray-950/70 px-3 py-2 text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                            />
+                        </td>
+                        <td class="p-2">
+                            <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                inputmode="numeric"
+                                value="${Number(band.maxPercentile || 0)}"
+                                oninput="adminDashboard.updateScalingBandField(${index}, 'maxPercentile', this.value)"
+                                class="w-full rounded-lg border border-gray-700 bg-gray-950/70 px-3 py-2 text-right text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                            />
+                        </td>
+                        <td class="p-2">
+                            <input
+                                type="number"
+                                min="0"
+                                inputmode="numeric"
+                                value="${Number(band.scaledTotal || 0)}"
+                                oninput="adminDashboard.updateScalingBandField(${index}, 'scaledTotal', this.value)"
+                                class="w-full rounded-lg border border-gray-700 bg-gray-950/70 px-3 py-2 text-right text-sm text-gray-200 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+                            />
+                        </td>
+                        <td class="p-2 text-right">
+                            <button
+                                onclick="adminDashboard.removeScalingBandRow(${index})"
+                                class="bg-red-900/60 hover:bg-red-700 text-red-100 px-3 py-2 rounded border border-red-500/30 transition text-xs"
+                            >
+                                Remove
+                            </button>
+                        </td>
+                    </tr>
+                `
+            )
+            .join("");
+    }
+
+    updateMilestoneField(index, field, value) {
+        const milestone = this.gradingConfig.milestones?.[index];
+        if (!milestone) {
+            return;
+        }
+
+        if (field === "label" || field === "metric") {
+            milestone[field] = value;
+        } else {
+            milestone[field] = toNonNegativeInteger(value, 0);
+        }
+
+        this.markGradingConfigDirty();
+    }
+
+    addMilestoneRow() {
+        this.gradingConfig.milestones.push({
+            label: `Milestone ${this.gradingConfig.milestones.length + 1}`,
+            metric: "survivalSeconds",
+            minValue: 0,
+            points: 0,
+        });
+        this.renderMilestoneRows();
+        this.markGradingConfigDirty();
+    }
+
+    removeMilestoneRow(index) {
+        if (!Array.isArray(this.gradingConfig.milestones)) {
+            return;
+        }
+        this.gradingConfig.milestones.splice(index, 1);
+        this.renderMilestoneRows();
+        this.markGradingConfigDirty();
+    }
+
+    updateScalingBandField(index, field, value) {
+        const band = this.gradingConfig.scalingBands?.[index];
+        if (!band) {
+            return;
+        }
+
+        if (field === "label") {
+            band.label = value;
+        } else {
+            band[field] = toNonNegativeInteger(value, 0);
+        }
+
+        this.markGradingConfigDirty();
+    }
+
+    addScalingBandRow() {
+        this.gradingConfig.scalingBands.push({
+            label: `Band ${this.gradingConfig.scalingBands.length + 1}`,
+            maxPercentile: 100,
+            scaledTotal: 0,
+        });
+        this.renderScalingBandRows();
+        this.markGradingConfigDirty();
+    }
+
+    removeScalingBandRow(index) {
+        if (!Array.isArray(this.gradingConfig.scalingBands)) {
+            return;
+        }
+        this.gradingConfig.scalingBands.splice(index, 1);
+        this.renderScalingBandRows();
+        this.markGradingConfigDirty();
+    }
+
+    buildGradingConfigPayload() {
+        return {
+            scoreThreshold: {
+                minScore: toNonNegativeInteger(this.gradingConfig.scoreThreshold.minScore, 0),
+                points: toNonNegativeInteger(this.gradingConfig.scoreThreshold.points, 0),
+            },
+            timeThreshold: {
+                minSeconds: toNonNegativeInteger(this.gradingConfig.timeThreshold.minSeconds, 0),
+                points: toNonNegativeInteger(this.gradingConfig.timeThreshold.points, 0),
+            },
+            validRunsThreshold: {
+                minRuns: toNonNegativeInteger(this.gradingConfig.validRunsThreshold.minRuns, 0),
+                points: toNonNegativeInteger(this.gradingConfig.validRunsThreshold.points, 0),
+            },
+            integrityPoints: toNonNegativeInteger(this.gradingConfig.integrityPoints, 0),
+            milestones: (this.gradingConfig.milestones || []).map((milestone) => ({
+                label: normalizeText(milestone.label),
+                metric: milestone.metric === "score" ? "score" : "survivalSeconds",
+                minValue: toNonNegativeInteger(milestone.minValue, 0),
+                points: toNonNegativeInteger(milestone.points, 0),
+            })),
+            scalingBands: (this.gradingConfig.scalingBands || []).map((band) => ({
+                label: normalizeText(band.label),
+                maxPercentile: toNonNegativeInteger(band.maxPercentile, 0),
+                scaledTotal: toNonNegativeInteger(band.scaledTotal, 0),
+            })),
+        };
+    }
+
+    async calculateGrades() {
+        const payload = this.buildGradingConfigPayload();
+        this.setGradingBusy(true);
+
+        try {
+            const preview = await this.apiRequest("/admin/grades/preview", {
+                method: "POST",
+                body: JSON.stringify(payload),
+            });
+
+            this.gradingPreview = preview;
+            this.gradingPreviewConfig = cloneValue(payload);
+            this.gradingPreviewDirty = false;
+            this.renderGradingPreview();
+            this.updateGradingSummary();
+            this.updateGradingButtons();
+            this.showToast(
+                `Calculated grades for ${Number(preview?.summary?.cohortSize || 0)} players`
+            );
+        } catch (error) {
+            this.showToast(error.message || "Failed to calculate grades", "error");
+        } finally {
+            this.setGradingBusy(false);
+        }
+    }
+
+    renderGradingPreview() {
+        if (!this.gradingPreviewHeadRow || !this.gradingPreviewBody) {
+            return;
+        }
+
+        const rows = Array.isArray(this.gradingPreview?.rows) ? this.gradingPreview.rows : [];
+        const milestoneDefinitions = buildMilestoneDefinitions(
+            this.gradingPreviewConfig?.milestones || []
+        );
+        const headerCells = [
+            "Rank",
+            "Player",
+            "Name",
+            "Flagged",
+            "Best Score",
+            "Best Time (s)",
+            "Runs",
+            "Score Pts",
+            "Time Pts",
+            "Run Pts",
+            "Integrity",
+            ...milestoneDefinitions.map((milestone) => milestone.label),
+            "Raw Total",
+            "Scaled Total",
+        ];
+
+        this.gradingPreviewHeadRow.innerHTML = headerCells
+            .map((label) => `<th class="p-3">${escapeHtml(label)}</th>`)
+            .join("");
+
+        if (!rows.length) {
+            this.gradingPreviewBody.innerHTML = `
+                <tr>
+                    <td colspan="${headerCells.length}" class="p-4 text-center text-gray-500 italic">No grading rows available.</td>
+                </tr>
+            `;
+            return;
+        }
+
+        this.gradingPreviewBody.innerHTML = rows
+            .map((row) => {
+                const milestoneCells = milestoneDefinitions
+                    .map(
+                        (milestone) => `
+                            <td class="p-3 text-right">${Number(
+                                row?.milestoneAwards?.[milestone.id] || 0
+                            )}</td>
+                        `
+                    )
+                    .join("");
+
+                return `
+                    <tr class="border-b border-gray-800">
+                        <td class="p-3">${Number(row.rawRank || 0)}</td>
+                        <td class="p-3 font-semibold text-white">${escapeHtml(row.username || "")}</td>
+                        <td class="p-3">${escapeHtml(row.displayName || "-")}</td>
+                        <td class="p-3">${row.flagged ? "Yes" : "No"}</td>
+                        <td class="p-3 text-right text-yellow-300">${Number(row.bestScore || 0)}</td>
+                        <td class="p-3 text-right">${Number(row.bestSurvivalSeconds || 0)}</td>
+                        <td class="p-3 text-right">${Number(row.validRunCount || 0)}</td>
+                        <td class="p-3 text-right">${Number(row.scoreThresholdPointsAwarded || 0)}</td>
+                        <td class="p-3 text-right">${Number(row.timeThresholdPointsAwarded || 0)}</td>
+                        <td class="p-3 text-right">${Number(row.validRunsPointsAwarded || 0)}</td>
+                        <td class="p-3 text-right">${Number(row.integrityPointsAwarded || 0)}</td>
+                        ${milestoneCells}
+                        <td class="p-3 text-right text-cyan-200">${Number(row.rawTotal || 0)}</td>
+                        <td class="p-3 text-right text-emerald-200">${Number(row.scaledTotal || 0)}</td>
+                    </tr>
+                `;
+            })
+            .join("");
+    }
+
+    buildGradingCsvHeaders(mode = "raw") {
+        const milestoneDefinitions = buildMilestoneDefinitions(
+            this.gradingPreviewConfig?.milestones || []
+        );
+        const headers = [
+            { key: "username", label: "username" },
+            { key: "displayName", label: "displayName" },
+            { key: "locked", label: "locked" },
+            { key: "flagged", label: "flagged" },
+            { key: "lives", label: "lives" },
+            { key: "startingBudget", label: "startingBudget" },
+            { key: "validRunCount", label: "validRunCount" },
+            { key: "bestScore", label: "bestScore" },
+            { key: "bestSurvivalSeconds", label: "bestSurvivalSeconds" },
+            {
+                key: "scoreThresholdPointsAwarded",
+                label: "scoreThresholdPointsAwarded",
+            },
+            {
+                key: "timeThresholdPointsAwarded",
+                label: "timeThresholdPointsAwarded",
+            },
+            {
+                key: "validRunsPointsAwarded",
+                label: "validRunsPointsAwarded",
+            },
+            {
+                key: "integrityPointsAwarded",
+                label: "integrityPointsAwarded",
+            },
+            ...milestoneDefinitions.map((milestone) => ({
+                key: `milestone_${milestone.id}`,
+                label: `milestone_${milestone.id}`,
+            })),
+            { key: "rawTotal", label: "rawTotal" },
+            { key: "rawRank", label: "rawRank" },
+        ];
+
+        if (mode === "scaled") {
+            headers.push(
+                { key: "scalePercentile", label: "scalePercentile" },
+                { key: "scaleBandLabel", label: "scaleBandLabel" },
+                { key: "scaledTotal", label: "scaledTotal" }
+            );
+        }
+
+        return headers;
+    }
+
+    buildGradingCsvRows(mode = "raw") {
+        const rows = Array.isArray(this.gradingPreview?.rows) ? this.gradingPreview.rows : [];
+        const milestoneDefinitions = buildMilestoneDefinitions(
+            this.gradingPreviewConfig?.milestones || []
+        );
+
+        return rows.map((row) => {
+            const csvRow = {
+                username: row.username || "",
+                displayName: row.displayName || "",
+                locked: row.locked ? "true" : "false",
+                flagged: row.flagged ? "true" : "false",
+                lives: Number(row.lives || 0),
+                startingBudget: Number(row.startingBudget || 0),
+                validRunCount: Number(row.validRunCount || 0),
+                bestScore: Number(row.bestScore || 0),
+                bestSurvivalSeconds: Number(row.bestSurvivalSeconds || 0),
+                scoreThresholdPointsAwarded: Number(row.scoreThresholdPointsAwarded || 0),
+                timeThresholdPointsAwarded: Number(row.timeThresholdPointsAwarded || 0),
+                validRunsPointsAwarded: Number(row.validRunsPointsAwarded || 0),
+                integrityPointsAwarded: Number(row.integrityPointsAwarded || 0),
+                rawTotal: Number(row.rawTotal || 0),
+                rawRank: Number(row.rawRank || 0),
+            };
+
+            milestoneDefinitions.forEach((milestone) => {
+                csvRow[`milestone_${milestone.id}`] = Number(
+                    row?.milestoneAwards?.[milestone.id] || 0
+                );
+            });
+
+            if (mode === "scaled") {
+                csvRow.scalePercentile = Number(row.scalePercentile || 0);
+                csvRow.scaleBandLabel = row.scaleBandLabel || "";
+                csvRow.scaledTotal = Number(row.scaledTotal || 0);
+            }
+
+            return csvRow;
+        });
+    }
+
+    exportGradesCsv(mode = "raw") {
+        if (!this.gradingPreview || this.gradingPreviewDirty) {
+            this.showToast("Calculate grades before exporting", "error");
+            return;
+        }
+
+        const headers = this.buildGradingCsvHeaders(mode);
+        const rows = this.buildGradingCsvRows(mode);
+        const csvContent = buildCsvContent(headers, rows);
+        const timestamp = formatFilenameTimestamp(this.gradingPreview?.summary?.generatedAt);
+        const filename =
+            mode === "scaled"
+                ? `assignment-grades-scaled-${timestamp}.csv`
+                : `assignment-grades-raw-${timestamp}.csv`;
+
+        downloadCsvFile(filename, csvContent);
+        this.showToast(mode === "scaled" ? "Scaled CSV exported" : "Raw CSV exported");
     }
 
     async refreshData() {
@@ -491,6 +1248,7 @@ class AdminDashboard {
         const panels = {
             players: document.getElementById("players-panel"),
             leaderboard: document.getElementById("leaderboard-panel"),
+            grading: document.getElementById("grading-panel"),
             runs: document.getElementById("runs-panel"),
         };
 
@@ -505,11 +1263,14 @@ class AdminDashboard {
             button.classList.toggle("text-blue-100", isActive && tabName === "players");
             button.classList.toggle("bg-purple-900/60", isActive && tabName === "leaderboard");
             button.classList.toggle("text-purple-100", isActive && tabName === "leaderboard");
+            button.classList.toggle("bg-cyan-900/60", isActive && tabName === "grading");
+            button.classList.toggle("text-cyan-100", isActive && tabName === "grading");
             button.classList.toggle("bg-emerald-900/60", isActive && tabName === "runs");
             button.classList.toggle("text-emerald-100", isActive && tabName === "runs");
             if (!isActive) {
                 button.classList.remove("bg-blue-900/60", "text-blue-100");
                 button.classList.remove("bg-purple-900/60", "text-purple-100");
+                button.classList.remove("bg-cyan-900/60", "text-cyan-100");
                 button.classList.remove("bg-emerald-900/60", "text-emerald-100");
             }
         });
