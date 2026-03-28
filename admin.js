@@ -1640,4 +1640,5 @@ class AdminDashboard {
     }
 }
 
-const adminDashboard = new AdminDashboard();
+window.AdminDashboard = AdminDashboard;
+window.adminDashboard = new AdminDashboard();

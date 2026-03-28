@@ -4,6 +4,11 @@
   "private": true,
   "scripts": {
     "build": "node scripts/build-pages.js",
-    "generate-env": "node scripts/generate-env-config.js"
+    "generate-env": "node scripts/generate-env-config.js",
+    "test": "node --test test/*.test.js"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.2",
+    "jsdom": "^26.1.0"
   }
 }
