@@ -346,6 +346,29 @@
         </li>
       </ul>
     </div>
+
+    <div id="announcementsPanel" class="absolute bottom-24 right-4 glass-panel rounded-xl p-4 w-80 pointer-events-auto">
+      <div class="flex items-center justify-between mb-2 border-b border-gray-700 pb-2">
+        <div>
+          <div class="text-xs font-bold text-cyan-300 uppercase tracking-wider">Announcements</div>
+          <div class="text-[10px] text-gray-500 font-mono">Admin updates for this assignment</div>
+        </div>
+        <div class="flex items-center gap-2">
+          <span id="announcement-unread-badge" class="hidden min-w-5 rounded-full bg-red-500 px-2 py-0.5 text-center text-[10px] font-bold text-white">0</span>
+          <button onclick="refreshAnnouncements()" class="w-6 h-6 flex items-center justify-center rounded border border-gray-600 bg-gray-800 text-gray-300 hover:bg-gray-700 transition" title="Refresh announcements">
+            ↻
+          </button>
+          <button onclick="toggleAnnouncementsPanel()" class="w-6 h-6 flex items-center justify-center rounded border border-gray-600 bg-gray-800 text-gray-300 hover:bg-gray-700 transition" title="Toggle announcements">
+            <span id="announcements-panel-icon" class="text-[10px]">▲</span>
+          </button>
+        </div>
+      </div>
+      <div id="announcements-panel-content">
+        <div id="announcements-loading" class="text-xs text-gray-500 font-mono">Loading announcements...</div>
+        <div id="announcements-empty" class="hidden text-xs text-gray-500 font-mono">No announcements yet.</div>
+        <div id="announcements-list" class="mt-2 space-y-2 max-h-64 overflow-y-auto pr-1"></div>
+      </div>
+    </div>
   </div>
 
   <!-- UI Overlay: Bottom Toolbar -->
@@ -999,6 +1022,7 @@
   <script src="src/tutorial.js"></script>
   <script src="env-config.js"></script>
   <script src="app-config.js"></script>
+  <script src="src/services/RunSyncService.js"></script>
   <script src="game.js"></script>
 </body>
 

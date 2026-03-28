@@ -6,6 +6,18 @@ const STATE = {
     playerStartingBudget: null,
     pendingLifeSync: null,
     gameStartedAt: new Date().toISOString(),
+    runSessionId: null,
+    runSummary: null,
+    runTimelineBuckets: null,
+    runTimelineStartedAt: 0,
+    announcements: {
+        messages: [],
+        nextCursor: null,
+        unreadCount: 0,
+        fetchInFlight: false,
+        initialized: false,
+        pollTimer: null,
+    },
 
     score: {
         total: 0,
