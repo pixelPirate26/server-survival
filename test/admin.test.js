@@ -103,6 +103,11 @@ function setAdminSession(window) {
   );
 }
 
+function loadAdminScripts(window) {
+  loadWindowScript(window, "src", "admin-player-filters.js");
+  loadWindowScript(window, "admin.js");
+}
+
 async function loadAdminDashboard({ players } = {}) {
   const dom = createDomFromHtml("admin.html", { url: "http://localhost/admin.html" });
   const { window } = dom;
@@ -111,7 +116,7 @@ async function loadAdminDashboard({ players } = {}) {
 
   setAdminSession(window);
   window.fetch = createAdminFetchStub(fetchRecords, { players });
-  loadWindowScript(window, "admin.js");
+  loadAdminScripts(window);
   await flushAsyncWork();
 
   return {
@@ -153,7 +158,7 @@ test("grading preview posts normalized payloads and exports fresh CSV data", asy
     };
   };
 
-  loadWindowScript(window, "admin.js");
+  loadAdminScripts(window);
   await flushAsyncWork();
 
   const dashboard = window.adminDashboard;

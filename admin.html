@@ -158,44 +158,21 @@
                     <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
                         <div>
                             <label for="player-campus-filter" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Campus</label>
-                            <select id="player-campus-filter" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500">
-                                <option value="">All Campuses</option>
-                                <option value="RR">RR</option>
-                                <option value="EC">EC</option>
-                            </select>
+                            <select id="player-campus-filter" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"></select>
                         </div>
                         <div>
                             <label for="player-branch-filter" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Branch</label>
-                            <select id="player-branch-filter" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500">
-                                <option value="">All Branches</option>
-                                <option value="CS">CS</option>
-                                <option value="AI">AI</option>
-                            </select>
+                            <select id="player-branch-filter" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"></select>
                         </div>
                         <div>
                             <label for="player-section-filter" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Section</label>
-                            <select id="player-section-filter" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500">
-                                <option value="">All Sections</option>
-                                <option value="A">A</option>
-                                <option value="B">B</option>
-                                <option value="C">C</option>
-                                <option value="D">D</option>
-                                <option value="E">E</option>
-                                <option value="F">F</option>
-                                <option value="G">G</option>
-                                <option value="H">H</option>
-                                <option value="I">I</option>
-                                <option value="J">J</option>
-                                <option value="K">K</option>
-                                <option value="L">L</option>
-                            </select>
+                            <select id="player-section-filter" class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"></select>
                         </div>
                         <div>
                             <label for="player-username-filter" class="block text-[11px] uppercase tracking-wider text-gray-500 font-mono mb-2">Username</label>
                             <input
                                 id="player-username-filter"
                                 type="text"
-                                placeholder="Simple string match"
                                 class="w-full rounded-xl border border-gray-700 bg-gray-950/70 px-4 py-3 text-sm text-gray-200 placeholder:text-gray-500 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
                             />
                         </div>
@@ -470,6 +447,7 @@
     </div>
     <script src="env-config.js"></script>
     <script src="app-config.js"></script>
+    <script src="src/admin-player-filters.js"></script>
     <script src="admin.js"></script>
 </body>
 </html>

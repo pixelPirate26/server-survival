@@ -1,4 +1,5 @@
 const API_BASE_URL = window.SERVER_API_URL
+const PLAYER_FILTER_CONFIG = window.ADMIN_PLAYER_FILTERS;
 const DEFAULT_GRADING_CONFIG = Object.freeze({
     scoreThreshold: {
         minScore: 1000,
@@ -150,6 +151,19 @@ function formatFilenameTimestamp(value) {
     return `${year}${month}${day}-${hours}${minutes}${seconds}`;
 }
 
+function buildSelectOptionsMarkup(config = {}) {
+    const allLabel = String(config.allLabel || "All");
+    const options = Array.isArray(config.options) ? config.options : [];
+
+    return [
+        `<option value="">${escapeHtml(allLabel)}</option>`,
+        ...options.map((option) => {
+            const value = String(option || "");
+            return `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`;
+        }),
+    ].join("");
+}
+
 class AdminDashboard {
     constructor() {
         this.playerTableBody = document.getElementById("player-table-body");
@@ -213,6 +227,7 @@ class AdminDashboard {
         this.gradingPreviewDirty = true;
         this.gradingBusy = false;
         this.activeTab = "players";
+        this.initializePlayerFilters();
         this.bindPlayerFilters();
         this.bindAnnouncementComposer();
         this.bindBulkSettingsForm();
@@ -1171,6 +1186,24 @@ class AdminDashboard {
 
             return true;
         });
+    }
+
+    initializePlayerFilters() {
+        [
+            [this.playerCampusFilter, PLAYER_FILTER_CONFIG?.campus],
+            [this.playerBranchFilter, PLAYER_FILTER_CONFIG?.branch],
+            [this.playerSectionFilter, PLAYER_FILTER_CONFIG?.section],
+        ].forEach(([element, config]) => {
+            if (!element || !config) {
+                return;
+            }
+
+            element.innerHTML = buildSelectOptionsMarkup(config);
+        });
+
+        if (this.playerUsernameFilter && PLAYER_FILTER_CONFIG?.username?.placeholder) {
+            this.playerUsernameFilter.placeholder = PLAYER_FILTER_CONFIG.username.placeholder;
+        }
     }
 
     bindPlayerFilters() {
