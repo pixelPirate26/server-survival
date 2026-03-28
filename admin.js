@@ -56,7 +56,6 @@ const DEFAULT_GRADING_CONFIG = Object.freeze({
         },
     ],
 });
-
 function cloneValue(value) {
     return JSON.parse(JSON.stringify(value));
 }
@@ -176,6 +175,12 @@ class AdminDashboard {
         this.bulkSettingsSummary = document.getElementById("bulk-settings-summary");
         this.bulkSettingsSelectionCount = document.getElementById("bulk-settings-selection-count");
         this.bulkSettingsApplyBtn = document.getElementById("bulk-settings-apply-btn");
+        this.playerCampusFilter = document.getElementById("player-campus-filter");
+        this.playerBranchFilter = document.getElementById("player-branch-filter");
+        this.playerSectionFilter = document.getElementById("player-section-filter");
+        this.playerUsernameFilter = document.getElementById("player-username-filter");
+        this.playerFilterSummary = document.getElementById("player-filter-summary");
+        this.playerFiltersResetBtn = document.getElementById("player-filters-reset-btn");
         this.gradingScoreThresholdInput = document.getElementById("grading-score-threshold-input");
         this.gradingScorePointsInput = document.getElementById("grading-score-points-input");
         this.gradingTimeThresholdInput = document.getElementById("grading-time-threshold-input");
@@ -193,6 +198,13 @@ class AdminDashboard {
         this.gradingPreviewBody = document.getElementById("grading-preview-body");
         this.selectedUsers = new Set();
         this.players = [];
+        this.filteredPlayers = [];
+        this.playerFilters = {
+            campus: "",
+            branch: "",
+            section: "",
+            username: "",
+        };
         this.runs = [];
         this.runDetailRawVisible = false;
         this.gradingConfig = cloneValue(DEFAULT_GRADING_CONFIG);
@@ -201,6 +213,7 @@ class AdminDashboard {
         this.gradingPreviewDirty = true;
         this.gradingBusy = false;
         this.activeTab = "players";
+        this.bindPlayerFilters();
         this.bindAnnouncementComposer();
         this.bindBulkSettingsForm();
         this.bindGradingForm();
@@ -980,7 +993,7 @@ class AdminDashboard {
                 this.apiRequest("/admin/leaderboard", { method: "GET" }),
             ]);
 
-            this.renderPlayers(playersPayload.players || []);
+            this.setPlayers(playersPayload.players || []);
             this.renderLeaderboard(leaderboardPayload.leaderboard || []);
             this.updateAnnouncementComposerState();
             this.updateBulkSettingsState();
@@ -1012,18 +1025,26 @@ class AdminDashboard {
         }
     }
 
-    renderPlayers(players) {
-        this.players = players;
-        const playerNames = new Set(players.map((player) => player.username));
-        Array.from(this.selectedUsers).forEach((username) => {
-            if (!playerNames.has(username)) {
-                this.selectedUsers.delete(username);
-            }
-        });
+    renderPlayers() {
+        const players = this.getFilteredPlayers();
+        this.filteredPlayers = players;
+
+        const selectAll = document.getElementById("select-all");
+        if (selectAll) {
+            const allSelected =
+                players.length > 0 && players.every((player) => this.selectedUsers.has(player.username));
+            const someVisibleSelected = players.some((player) =>
+                this.selectedUsers.has(player.username)
+            );
+            selectAll.checked = allSelected;
+            selectAll.indeterminate = !allSelected && someVisibleSelected;
+        }
+
+        this.updatePlayerFilterState();
+        this.updateAnnouncementComposerState();
+        this.updateBulkSettingsState();
 
         if (!players.length) {
-            this.updateAnnouncementComposerState();
-            this.updateBulkSettingsState();
             this.playerTableBody.innerHTML = `
                 <tr>
                     <td colspan="9" class="p-4 text-center text-gray-500 italic">No players found.</td>
@@ -1031,16 +1052,6 @@ class AdminDashboard {
             `;
             return;
         }
-
-        const allSelected = players.every((player) => this.selectedUsers.has(player.username));
-        const selectAll = document.getElementById("select-all");
-        if (selectAll) {
-            selectAll.checked = allSelected;
-            selectAll.indeterminate = !allSelected && this.selectedUsers.size > 0;
-        }
-
-        this.updateAnnouncementComposerState();
-        this.updateBulkSettingsState();
 
         this.playerTableBody.innerHTML = players
             .map((player) => {
@@ -1112,6 +1123,108 @@ class AdminDashboard {
                 `;
             })
             .join("");
+    }
+
+    setPlayers(players) {
+        this.players = Array.isArray(players) ? players : [];
+        const playerNames = new Set(this.players.map((player) => player.username));
+        Array.from(this.selectedUsers).forEach((username) => {
+            if (!playerNames.has(username)) {
+                this.selectedUsers.delete(username);
+            }
+        });
+        this.renderPlayers();
+    }
+
+    readPlayerFilters() {
+        return {
+            campus: normalizeText(this.playerCampusFilter?.value).toUpperCase(),
+            branch: normalizeText(this.playerBranchFilter?.value).toUpperCase(),
+            section: normalizeText(this.playerSectionFilter?.value).toUpperCase(),
+            username: normalizeText(this.playerUsernameFilter?.value).toLowerCase(),
+        };
+    }
+
+    getFilteredPlayers() {
+        this.playerFilters = this.readPlayerFilters();
+        return this.players.filter((player) => {
+            const campus = normalizeText(player.campus).toUpperCase();
+            const branch = normalizeText(player.branch).toUpperCase();
+            const section = normalizeText(player.section).toUpperCase();
+            const username = normalizeText(player.username).toLowerCase();
+
+            if (this.playerFilters.campus && campus !== this.playerFilters.campus) {
+                return false;
+            }
+
+            if (this.playerFilters.branch && branch !== this.playerFilters.branch) {
+                return false;
+            }
+
+            if (this.playerFilters.section && section !== this.playerFilters.section) {
+                return false;
+            }
+
+            if (this.playerFilters.username && !username.includes(this.playerFilters.username)) {
+                return false;
+            }
+
+            return true;
+        });
+    }
+
+    bindPlayerFilters() {
+        [
+            [this.playerCampusFilter, "change"],
+            [this.playerBranchFilter, "change"],
+            [this.playerSectionFilter, "change"],
+            [this.playerUsernameFilter, "input"],
+        ].forEach(([element, eventName]) => {
+            if (!element) {
+                return;
+            }
+
+            element.addEventListener(eventName, () => {
+                this.renderPlayers();
+            });
+        });
+
+        this.updatePlayerFilterState();
+    }
+
+    updatePlayerFilterState() {
+        this.playerFilters = this.readPlayerFilters();
+        const hasActiveFilters = Object.values(this.playerFilters).some((value) => value !== "");
+        const filteredCount = this.filteredPlayers.length;
+        const totalCount = this.players.length;
+
+        if (this.playerFilterSummary) {
+            this.playerFilterSummary.textContent = hasActiveFilters
+                ? `Showing ${filteredCount} of ${totalCount} players.`
+                : `Showing all ${totalCount} players.`;
+        }
+
+        if (this.playerFiltersResetBtn) {
+            this.playerFiltersResetBtn.disabled = !hasActiveFilters;
+            this.playerFiltersResetBtn.classList.toggle("opacity-40", !hasActiveFilters);
+            this.playerFiltersResetBtn.classList.toggle("cursor-not-allowed", !hasActiveFilters);
+        }
+    }
+
+    clearPlayerFilters() {
+        if (this.playerCampusFilter) {
+            this.playerCampusFilter.value = "";
+        }
+        if (this.playerBranchFilter) {
+            this.playerBranchFilter.value = "";
+        }
+        if (this.playerSectionFilter) {
+            this.playerSectionFilter.value = "";
+        }
+        if (this.playerUsernameFilter) {
+            this.playerUsernameFilter.value = "";
+        }
+        this.renderPlayers();
     }
 
     renderLeaderboard(rows) {
@@ -1455,7 +1568,7 @@ class AdminDashboard {
         } else {
             this.selectedUsers.delete(username);
         }
-        this.renderPlayers(this.players);
+        this.renderPlayers();
     }
 
     toggleSelectAll() {
@@ -1465,12 +1578,12 @@ class AdminDashboard {
         }
 
         if (selectAll.checked) {
-            this.players.forEach((player) => this.selectedUsers.add(player.username));
+            this.filteredPlayers.forEach((player) => this.selectedUsers.add(player.username));
         } else {
-            this.selectedUsers.clear();
+            this.filteredPlayers.forEach((player) => this.selectedUsers.delete(player.username));
         }
 
-        this.renderPlayers(this.players);
+        this.renderPlayers();
     }
 
     async sendAnnouncement(scope) {
