@@ -417,103 +417,40 @@ function applyOptimisticLifeLoss() {
     updateStartButtonAvailability();
 }
 
-function formatAnnouncementTimestamp(value) {
-    if (!value) {
+function truncateAnnouncementText(message, maxLength = 140) {
+    const text = String(message || "").trim();
+    if (!text) {
         return "";
     }
 
-    const timestamp = new Date(value);
-    if (Number.isNaN(timestamp.getTime())) {
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function buildAnnouncementNotificationText(messages) {
+    if (!Array.isArray(messages) || !messages.length) {
         return "";
     }
 
-    return timestamp.toLocaleString();
+    const latestPreview = truncateAnnouncementText(messages[messages.length - 1]?.message);
+    if (messages.length === 1) {
+        return latestPreview
+            ? `Admin notification: ${latestPreview}`
+            : "New admin notification received.";
+    }
+
+    return latestPreview
+        ? `${messages.length} new admin notifications. Latest: ${latestPreview}`
+        : `${messages.length} new admin notifications received.`;
 }
 
-function renderAnnouncements() {
-    const loadingEl = document.getElementById("announcements-loading");
-    const emptyEl = document.getElementById("announcements-empty");
-    const listEl = document.getElementById("announcements-list");
-    const badgeEl = document.getElementById("announcement-unread-badge");
-    if (!loadingEl || !emptyEl || !listEl || !badgeEl) {
-        return;
-    }
-
-    const announcements = STATE.announcements || {};
-    const messages = Array.isArray(announcements.messages) ? announcements.messages : [];
-
-    loadingEl.classList.toggle("hidden", announcements.initialized === true);
-    emptyEl.classList.toggle("hidden", !announcements.initialized || messages.length > 0);
-
-    listEl.innerHTML = messages
-        .slice()
-        .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
-        .slice(0, 12)
-        .map((message) => `
-            <article class="rounded-lg border border-cyan-500/20 bg-gray-900/70 p-3">
-                <div class="flex items-start justify-between gap-3">
-                    <div class="text-xs font-bold text-cyan-200 font-mono uppercase">
-                        ${message.audience === "selected" ? "Targeted Announcement" : "Broadcast Announcement"}
-                    </div>
-                    <div class="text-[10px] text-gray-500 font-mono whitespace-nowrap">${formatAnnouncementTimestamp(message.createdAt)}</div>
-                </div>
-                <p class="mt-2 text-sm leading-relaxed text-gray-200">${message.message}</p>
-                <div class="mt-2 text-[10px] text-gray-500 font-mono">From ${String(message.createdBy || "admin").toUpperCase()}</div>
-            </article>
-        `)
-        .join("");
-
-    badgeEl.textContent = String(announcements.unreadCount || 0);
-    badgeEl.classList.toggle("hidden", !announcements.unreadCount);
-}
-
-function markAnnouncementsRead() {
-    if (!STATE.announcements) {
-        return;
-    }
-
-    STATE.announcements.unreadCount = 0;
-    renderAnnouncements();
-}
-
-window.toggleAnnouncementsPanel = () => {
-    const content = document.getElementById("announcements-panel-content");
-    const icon = document.getElementById("announcements-panel-icon");
-    if (!content) {
-        return;
-    }
-
-    content.classList.toggle("hidden");
-    if (icon) {
-        icon.innerText = content.classList.contains("hidden") ? "▼" : "▲";
-    }
-
-    if (!content.classList.contains("hidden")) {
-        markAnnouncementsRead();
-    }
-};
-
-function mergeAnnouncements(existingMessages, incomingMessages) {
-    const byId = new Map();
-    [...existingMessages, ...incomingMessages].forEach((message) => {
-        if (!message?.id) {
-            return;
-        }
-        byId.set(message.id, message);
-    });
-    return Array.from(byId.values());
-}
-
-async function fetchPlayerAnnouncements({ initial = false } = {}) {
+async function fetchPlayerAnnouncements() {
     const announcements = STATE.announcements;
     if (!announcements || announcements.fetchInFlight || isAdminUser() || !getAuthToken()) {
         return;
     }
 
     announcements.fetchInFlight = true;
-    const previousIds = new Set((announcements.messages || []).map((message) => message.id));
-    const afterId = initial ? null : announcements.nextCursor;
-    let pageCursor = afterId;
+    let pageCursor = announcements.nextCursor;
     let allMessages = [];
     let nextCursor = announcements.nextCursor;
     let hasMore = true;
@@ -535,45 +472,26 @@ async function fetchPlayerAnnouncements({ initial = false } = {}) {
             nextCursor = payload.nextCursor || nextCursor || null;
             pageCount += 1;
 
-            if (!initial || messages.length < ANNOUNCEMENT_FETCH_LIMIT || pageCount >= 10 || !payload.nextCursor) {
+            if (
+                messages.length < ANNOUNCEMENT_FETCH_LIMIT ||
+                pageCount >= 10 ||
+                !payload.nextCursor ||
+                payload.nextCursor === pageCursor
+            ) {
                 hasMore = false;
             } else {
                 pageCursor = payload.nextCursor;
             }
         }
 
-        announcements.messages = mergeAnnouncements(announcements.messages || [], allMessages);
         announcements.nextCursor = nextCursor;
-
-        const newMessages = allMessages.filter((message) => !previousIds.has(message.id));
-        if (announcements.initialized && newMessages.length) {
-            const panelContent = document.getElementById("announcements-panel-content");
-            if (panelContent && !panelContent.classList.contains("hidden")) {
-                announcements.unreadCount = 0;
-            } else {
-                announcements.unreadCount += newMessages.length;
-            }
-
-            const latestMessage = newMessages[newMessages.length - 1];
-            const preview = String(latestMessage?.message || "").slice(0, 80);
-            addInterventionWarning(
-                newMessages.length === 1
-                    ? `Admin announcement: ${preview}${preview.length === 80 ? "..." : ""}`
-                    : `${newMessages.length} new admin announcements received.`,
-                "info",
-                5000
-            );
+        if (allMessages.length) {
+            addInterventionWarning(buildAnnouncementNotificationText(allMessages), "info", 30000, {
+                persistInState: false,
+                transitionDurationMs: 800,
+            });
         }
-
-        announcements.initialized = true;
-        renderAnnouncements();
     } catch (error) {
-        if (initial) {
-            const loadingEl = document.getElementById("announcements-loading");
-            if (loadingEl) {
-                loadingEl.textContent = "Announcements unavailable.";
-            }
-        }
         if (error.status === 401) {
             clearSessionAndRedirect();
             return;
@@ -590,12 +508,10 @@ window.refreshAnnouncements = () => {
 
 function startAnnouncementPolling() {
     if (!STATE.announcements || STATE.announcements.pollTimer || isAdminUser()) {
-        renderAnnouncements();
         return;
     }
 
-    renderAnnouncements();
-    void fetchPlayerAnnouncements({ initial: true });
+    void fetchPlayerAnnouncements();
 
     STATE.announcements.pollTimer = setInterval(() => {
         if (document.visibilityState === "visible") {
@@ -1090,9 +1006,14 @@ function endMaliciousSpike() {
 
 // ==================== INTERVENTION MECHANICS ====================
 
-function addInterventionWarning(message, type = "warning", duration = 4000) {
+function addInterventionWarning(message, type = "warning", duration = 4000, options = {}) {
     const warningsContainer = document.getElementById("intervention-warnings");
     if (!warningsContainer) return;
+    const {
+        persistInState = true,
+        transitionDurationMs = 300,
+    } = options || {};
+    const safeDuration = Math.max(transitionDurationMs, duration);
 
     const warning = document.createElement("div");
     const typeStyles = {
@@ -1121,17 +1042,17 @@ function addInterventionWarning(message, type = "warning", duration = 4000) {
     }
 
     // Add to state for tracking
-    if (STATE.intervention) {
+    if (persistInState && STATE.intervention) {
         STATE.intervention.warnings.push({ message, type, time: Date.now() });
     }
 
     // Animate out before removing
     setTimeout(() => {
-        warning.style.transition = "all 0.3s ease-out";
+        warning.style.transition = `all ${transitionDurationMs}ms ease-out`;
         warning.style.opacity = "0";
         warning.style.transform = "translateY(-20px)";
-        setTimeout(() => warning.remove(), 300);
-    }, duration - 300);
+        setTimeout(() => warning.remove(), transitionDurationMs);
+    }, safeDuration - transitionDurationMs);
 }
 
 function updateTrafficShift(dt) {

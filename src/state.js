@@ -11,11 +11,8 @@ const STATE = {
     runTimelineBuckets: null,
     runTimelineStartedAt: 0,
     announcements: {
-        messages: [],
         nextCursor: null,
-        unreadCount: 0,
         fetchInFlight: false,
-        initialized: false,
         pollTimer: null,
     },
 
