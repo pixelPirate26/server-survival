@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Verifying Connection...</title>
+    <script src="env-config.js"></script>
+    <script>
+        // Redirect to backend /trust — browser shows cert warning here
+        // After user accepts, nginx auto-redirects back to login.html
+        window.location.href = window.SERVER_API_URL.replace('/api', '') + '/trust';
+    </script>
+</head>
+<body>
+    <p>Verifying secure connection, please wait...</p>
+</body>
+</html>
