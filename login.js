@@ -2,8 +2,8 @@
   try {
     await fetch(`${window.SERVER_API_URL}/health`);
   } catch (err) {
-    const returnUrl = encodeURIComponent(window.location.href);
-    window.location.href = `${window.SERVER_API_URL}/health?return=${returnUrl}`;
+    // Cert not trusted — send user through trust flow
+    window.location.href = 'trust.html';
   }
 })();
 
