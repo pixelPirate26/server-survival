@@ -1,9 +1,14 @@
 (async function () {
-  try {
-    await fetch(`${window.SERVER_API_URL}/health`);
-  } catch (err) {
-    // Cert not trusted — send user through trust flow
-    window.location.href = 'trust.html';
+  const params = new URLSearchParams(window.location.search);
+  const justTrusted = params.get('trusted') === '1';
+
+  if (!justTrusted) {
+    try {
+      await fetch(`${window.SERVER_API_URL}/health`);
+    } catch (err) {
+      window.location.href = 'trust.html';
+      return;
+    }
   }
 })();
 
