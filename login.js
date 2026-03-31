@@ -1,4 +1,13 @@
-const API_BASE_URL = window.SERVER_API_URL 
+(async function () {
+  try {
+    await fetch(`${window.SERVER_API_URL}/health`);
+  } catch (err) {
+    const returnUrl = encodeURIComponent(window.location.href);
+    window.location.href = `${window.SERVER_API_URL}/health?return=${returnUrl}`;
+  }
+})();
+
+const API_BASE_URL = window.SERVER_API_URL;
 
 document.addEventListener("DOMContentLoaded", () => {
     const loginForm = document.getElementById("login-form");
