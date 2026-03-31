@@ -6,7 +6,9 @@
     try {
       await fetch(`${window.SERVER_API_URL}/health`);
     } catch (err) {
-      window.location.href = 'trust.html';
+      // Go directly to backend — browser shows native cert warning
+      const base = window.SERVER_API_URL.replace('/api', '');
+      window.location.href = base + '/trust';
       return;
     }
   }
